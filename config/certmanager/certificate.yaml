@@ -1,0 +1,13 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: serving-cert
+  namespace: system
+spec:
+  dnsNames:
+  - nsclass-controller-webhook-service.nsclass-controller-system.svc
+  - nsclass-controller-webhook-service.nsclass-controller-system.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: nsclass-controller-selfsigned-issuer
+  secretName: webhook-server-cert

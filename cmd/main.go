@@ -37,6 +37,7 @@ import (
 
 	nsclassv1alpha1 "github.com/laverya/nsclass-controller/api/v1alpha1"
 	"github.com/laverya/nsclass-controller/internal/controller"
+	nsclasswebhook "github.com/laverya/nsclass-controller/internal/webhook"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -183,6 +184,12 @@ func main() {
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "namespaceclass")
+		os.Exit(1)
+	}
+	if err := (&nsclasswebhook.NamespaceValidator{
+		Client: mgr.GetClient(),
+	}).SetupWebhookWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create webhook", "webhook", "namespace")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

@@ -16,6 +16,7 @@ rules:
   - '*'
   verbs:
   - create
+  - delete
   - get
   - patch
   - update

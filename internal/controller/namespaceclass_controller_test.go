@@ -28,7 +28,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -92,7 +91,7 @@ var _ = Describe("NamespaceClass Controller", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "test-namespace",
 					Labels: map[string]string{
-						namespaceClassNameLabel: "gold",
+						namespaceClassNameKey: "gold",
 					},
 				},
 			}
@@ -104,18 +103,16 @@ var _ = Describe("NamespaceClass Controller", func() {
 			}}))
 		})
 
-		It("should only process updates where the namespace class label value changes", func() {
-			predicate := namespaceClassLabelChangedPredicate()
-
-			Expect(predicate.Update(event.UpdateEvent{
-				ObjectOld: namespaceWithClass("gold"),
-				ObjectNew: namespaceWithClass("gold"),
-			})).To(BeFalse())
-
-			Expect(predicate.Update(event.UpdateEvent{
-				ObjectOld: namespaceWithClass("gold"),
-				ObjectNew: namespaceWithClass("silver"),
-			})).To(BeTrue())
+		It("should read the NamespaceClass name from labels or annotations", func() {
+			Expect(namespaceClassName(namespaceWithClass("gold"))).To(Equal("gold"))
+			Expect(namespaceClassName(&corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-namespace",
+					Annotations: map[string]string{
+						namespaceClassNameKey: "silver",
+					},
+				},
+			})).To(Equal("silver"))
 		})
 	})
 
@@ -135,7 +132,7 @@ var _ = Describe("NamespaceClass Controller", func() {
 			unmatchedNamespaceName = fmt.Sprintf("apply-test-unmatched-%d", suffix)
 
 			Expect(k8sClient.Create(ctx, namespaceWithLabels(matchingNamespaceName, map[string]string{
-				namespaceClassNameLabel: className,
+				namespaceClassNameKey: className,
 			}))).To(Succeed())
 			Expect(k8sClient.Create(ctx, namespaceWithLabels(unmatchedNamespaceName, nil))).To(Succeed())
 		})
@@ -186,7 +183,7 @@ var _ = Describe("NamespaceClass Controller", func() {
 			Expect(configMap.Data).To(HaveKeyWithValue("key", "value"))
 			Expect(configMap.Annotations).To(HaveKeyWithValue("example.com/existing", "kept"))
 			Expect(configMap.Annotations).To(HaveKeyWithValue(namespaceClassManagedByAnnotation, namespaceClassManagedByValue))
-			Expect(configMap.Annotations).To(HaveKeyWithValue(namespaceClassNameLabel, className))
+			Expect(configMap.Annotations).To(HaveKeyWithValue(namespaceClassNameKey, className))
 
 			unmatchedConfigMap := &corev1.ConfigMap{}
 			err = k8sClient.Get(ctx, types.NamespacedName{
@@ -230,7 +227,7 @@ func namespaceWithClass(className string) *corev1.Namespace {
 		return namespaceWithLabels("test-namespace", nil)
 	}
 	return namespaceWithLabels("test-namespace", map[string]string{
-		namespaceClassNameLabel: className,
+		namespaceClassNameKey: className,
 	})
 }
 

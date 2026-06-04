@@ -53,6 +53,34 @@ type NamespaceClassStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// managedResources contains the resources last applied by this NamespaceClass.
+	// +listType=map
+	// +listMapKey=apiVersion
+	// +listMapKey=kind
+	// +listMapKey=namespace
+	// +listMapKey=name
+	// +optional
+	ManagedResources []NamespaceClassManagedResource `json:"managedResources,omitempty"`
+}
+
+// NamespaceClassManagedResource identifies a resource applied by a NamespaceClass.
+type NamespaceClassManagedResource struct {
+	// apiVersion is the resource API version.
+	// +required
+	APIVersion string `json:"apiVersion"`
+
+	// kind is the resource kind.
+	// +required
+	Kind string `json:"kind"`
+
+	// namespace is the resource namespace.
+	// +required
+	Namespace string `json:"namespace"`
+
+	// name is the resource name.
+	// +required
+	Name string `json:"name"`
 }
 
 // +kubebuilder:object:root=true

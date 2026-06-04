@@ -1,0 +1,30 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  annotations:
+    cert-manager.io/inject-ca-from: nsclass-controller-system/nsclass-controller-serving-cert
+  name: namespaceclass-namespace-validator
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: nsclass-controller-webhook-service
+      namespace: nsclass-controller-system
+      path: /validate-v1-namespace
+      port: 443
+  failurePolicy: Fail
+  matchPolicy: Equivalent
+  name: namespace.namespaceclass.akuity.io
+  rules:
+  - apiGroups:
+    - ""
+    apiVersions:
+    - v1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - namespaces
+    scope: Cluster
+  sideEffects: None
