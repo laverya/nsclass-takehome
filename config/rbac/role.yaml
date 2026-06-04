@@ -11,6 +11,15 @@ rules:
   - list
   - watch
 - apiGroups:
+  - '*'
+  resources:
+  - '*'
+  verbs:
+  - create
+  - get
+  - patch
+  - update
+- apiGroups:
   - nsclass.nsclass.laverya.com
   resources:
   - namespaceclasses

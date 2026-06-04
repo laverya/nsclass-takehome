@@ -18,12 +18,16 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -114,18 +118,134 @@ var _ = Describe("NamespaceClass Controller", func() {
 			})).To(BeTrue())
 		})
 	})
+
+	Context("When applying NamespaceClass resources", func() {
+		const configMapName = "managed-config"
+
+		var (
+			className              string
+			matchingNamespaceName  string
+			unmatchedNamespaceName string
+		)
+
+		BeforeEach(func() {
+			suffix := time.Now().UnixNano()
+			className = fmt.Sprintf("apply-test-%d", suffix)
+			matchingNamespaceName = fmt.Sprintf("apply-test-matching-%d", suffix)
+			unmatchedNamespaceName = fmt.Sprintf("apply-test-unmatched-%d", suffix)
+
+			Expect(k8sClient.Create(ctx, namespaceWithLabels(matchingNamespaceName, map[string]string{
+				namespaceClassNameLabel: className,
+			}))).To(Succeed())
+			Expect(k8sClient.Create(ctx, namespaceWithLabels(unmatchedNamespaceName, nil))).To(Succeed())
+		})
+
+		AfterEach(func() {
+			deleteIfExists(ctx, &nsclassv1alpha1.NamespaceClass{ObjectMeta: metav1.ObjectMeta{Name: className}})
+			deleteIfExists(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: matchingNamespaceName}})
+			deleteIfExists(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: unmatchedNamespaceName}})
+		})
+
+		It("should apply namespaced resources to matching namespaces with controller annotations", func() {
+			namespaceClass := &nsclassv1alpha1.NamespaceClass{
+				ObjectMeta: metav1.ObjectMeta{Name: className},
+				Spec: nsclassv1alpha1.NamespaceClassSpec{
+					Resources: []runtime.RawExtension{{
+						Raw: []byte(`{
+							"apiVersion": "v1",
+							"kind": "ConfigMap",
+							"metadata": {
+								"name": "managed-config",
+								"annotations": {
+									"example.com/existing": "kept"
+								}
+							},
+							"data": {
+								"key": "value"
+							}
+						}`),
+					}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, namespaceClass)).To(Succeed())
+
+			controllerReconciler := &NamespaceClassReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: className},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			configMap := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: matchingNamespaceName,
+				Name:      configMapName,
+			}, configMap)).To(Succeed())
+			Expect(configMap.Data).To(HaveKeyWithValue("key", "value"))
+			Expect(configMap.Annotations).To(HaveKeyWithValue("example.com/existing", "kept"))
+			Expect(configMap.Annotations).To(HaveKeyWithValue(namespaceClassManagedByAnnotation, namespaceClassManagedByValue))
+			Expect(configMap.Annotations).To(HaveKeyWithValue(namespaceClassNameLabel, className))
+
+			unmatchedConfigMap := &corev1.ConfigMap{}
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: unmatchedNamespaceName,
+				Name:      configMapName,
+			}, unmatchedConfigMap)
+			Expect(errors.IsNotFound(err)).To(BeTrue())
+		})
+
+		It("should reject cluster-scoped resources", func() {
+			namespaceClass := &nsclassv1alpha1.NamespaceClass{
+				ObjectMeta: metav1.ObjectMeta{Name: className},
+				Spec: nsclassv1alpha1.NamespaceClassSpec{
+					Resources: []runtime.RawExtension{{
+						Raw: []byte(`{
+							"apiVersion": "v1",
+							"kind": "Namespace",
+							"metadata": {
+								"name": "must-not-apply"
+							}
+						}`),
+					}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, namespaceClass)).To(Succeed())
+
+			controllerReconciler := &NamespaceClassReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: className},
+			})
+			Expect(err).To(MatchError(ContainSubstring("is not namespace scoped")))
+		})
+	})
 })
 
 func namespaceWithClass(className string) *corev1.Namespace {
-	namespace := &corev1.Namespace{
+	if className == "" {
+		return namespaceWithLabels("test-namespace", nil)
+	}
+	return namespaceWithLabels("test-namespace", map[string]string{
+		namespaceClassNameLabel: className,
+	})
+}
+
+func namespaceWithLabels(name string, labels map[string]string) *corev1.Namespace {
+	return &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-namespace",
+			Name:   name,
+			Labels: labels,
 		},
 	}
-	if className != "" {
-		namespace.Labels = map[string]string{
-			namespaceClassNameLabel: className,
-		}
+}
+
+func deleteIfExists(ctx context.Context, obj client.Object) {
+	err := k8sClient.Delete(ctx, obj)
+	if err != nil && !errors.IsNotFound(err) {
+		Expect(err).NotTo(HaveOccurred())
 	}
-	return namespace
 }
