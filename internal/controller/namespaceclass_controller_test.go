@@ -21,8 +21,10 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -37,8 +39,7 @@ var _ = Describe("NamespaceClass Controller", func() {
 		ctx := context.Background()
 
 		typeNamespacedName := types.NamespacedName{
-			Name:      resourceName,
-			Namespace: "default", // TODO(user):Modify as needed
+			Name: resourceName,
 		}
 		namespaceclass := &nsclassv1alpha1.NamespaceClass{}
 
@@ -48,8 +49,7 @@ var _ = Describe("NamespaceClass Controller", func() {
 			if err != nil && errors.IsNotFound(err) {
 				resource := &nsclassv1alpha1.NamespaceClass{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      resourceName,
-						Namespace: "default",
+						Name: resourceName,
 					},
 					// TODO(user): Specify other spec details if needed.
 				}
@@ -81,4 +81,51 @@ var _ = Describe("NamespaceClass Controller", func() {
 			// Example: If you expect a certain status condition after reconciliation, verify it here.
 		})
 	})
+
+	Context("When mapping Namespace events", func() {
+		It("should reconcile the NamespaceClass named by the namespace label", func() {
+			namespace := &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-namespace",
+					Labels: map[string]string{
+						namespaceClassNameLabel: "gold",
+					},
+				},
+			}
+
+			requests := namespaceToNamespaceClassRequests(ctx, namespace)
+
+			Expect(requests).To(Equal([]reconcile.Request{{
+				NamespacedName: types.NamespacedName{Name: "gold"},
+			}}))
+		})
+
+		It("should only process updates where the namespace class label value changes", func() {
+			predicate := namespaceClassLabelChangedPredicate()
+
+			Expect(predicate.Update(event.UpdateEvent{
+				ObjectOld: namespaceWithClass("gold"),
+				ObjectNew: namespaceWithClass("gold"),
+			})).To(BeFalse())
+
+			Expect(predicate.Update(event.UpdateEvent{
+				ObjectOld: namespaceWithClass("gold"),
+				ObjectNew: namespaceWithClass("silver"),
+			})).To(BeTrue())
+		})
+	})
 })
+
+func namespaceWithClass(className string) *corev1.Namespace {
+	namespace := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-namespace",
+		},
+	}
+	if className != "" {
+		namespace.Labels = map[string]string{
+			namespaceClassNameLabel: className,
+		}
+	}
+	return namespace
+}

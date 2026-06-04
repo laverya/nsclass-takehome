@@ -19,13 +19,22 @@ package controller
 import (
 	"context"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	nsclassv1alpha1 "github.com/laverya/nsclass-controller/api/v1alpha1"
 )
+
+const namespaceClassNameLabel = "namespaceclass.akuity.io/name"
 
 // NamespaceClassReconciler reconciles a NamespaceClass object
 type NamespaceClassReconciler struct {
@@ -36,6 +45,7 @@ type NamespaceClassReconciler struct {
 // +kubebuilder:rbac:groups=nsclass.nsclass.laverya.com,resources=namespaceclasses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nsclass.nsclass.laverya.com,resources=namespaceclasses/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nsclass.nsclass.laverya.com,resources=namespaceclasses/finalizers,verbs=update
+// +kubebuilder:rbac:groups=,resources=namespaces,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -58,6 +68,47 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 func (r *NamespaceClassReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&nsclassv1alpha1.NamespaceClass{}).
+		Watches(
+			&corev1.Namespace{},
+			handler.EnqueueRequestsFromMapFunc(namespaceToNamespaceClassRequests),
+			builder.WithPredicates(namespaceClassLabelChangedPredicate()),
+		).
 		Named("namespaceclass").
 		Complete(r)
+}
+
+func namespaceToNamespaceClassRequests(_ context.Context, obj client.Object) []reconcile.Request {
+	className := namespaceClassName(obj)
+	if className == "" {
+		return nil
+	}
+
+	return []reconcile.Request{{
+		NamespacedName: types.NamespacedName{Name: className},
+	}}
+}
+
+func namespaceClassLabelChangedPredicate() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool {
+			return namespaceClassName(e.Object) != ""
+		},
+		DeleteFunc: func(e event.DeleteEvent) bool {
+			return namespaceClassName(e.Object) != ""
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			return namespaceClassName(e.ObjectOld) != namespaceClassName(e.ObjectNew)
+		},
+		GenericFunc: func(e event.GenericEvent) bool {
+			return namespaceClassName(e.Object) != ""
+		},
+	}
+}
+
+func namespaceClassName(obj client.Object) string {
+	if obj == nil {
+		return ""
+	}
+
+	return obj.GetLabels()[namespaceClassNameLabel]
 }
