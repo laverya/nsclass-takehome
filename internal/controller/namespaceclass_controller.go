@@ -56,7 +56,7 @@ type NamespaceClassReconciler struct {
 // +kubebuilder:rbac:groups=nsclass.nsclass.laverya.com,resources=namespaceclasses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nsclass.nsclass.laverya.com,resources=namespaceclasses/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nsclass.nsclass.laverya.com,resources=namespaceclasses/finalizers,verbs=update
-// +kubebuilder:rbac:groups=,resources=namespaces,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups=*,resources=*,verbs=get;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to

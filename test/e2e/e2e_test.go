@@ -356,6 +356,76 @@ var _ = Describe("Manager", Ordered, func() {
 			expectNoConfigMap(nsName, oldConfigMapName)
 		})
 
+		It("should create additional resources when a NamespaceClass gains a resource", func() {
+			className := uniqueName("add-resource-class")
+			nsName := uniqueName("add-resource-ns")
+			existingConfigMapName := uniqueName("existing-config")
+			addedConfigMapName := uniqueName("added-config")
+			DeferCleanup(deleteNamespace, nsName)
+			DeferCleanup(deleteNamespaceClass, className)
+
+			_, err := applyYAML(namespaceClassManifest(className, existingConfigMapName))
+			Expect(err).NotTo(HaveOccurred())
+			_, err = applyYAML(namespaceManifest(nsName, className))
+			Expect(err).NotTo(HaveOccurred())
+			expectConfigMap(nsName, existingConfigMapName, className)
+
+			_, err = applyYAML(namespaceClassManifest(className, existingConfigMapName, addedConfigMapName))
+			Expect(err).NotTo(HaveOccurred())
+
+			expectConfigMap(nsName, existingConfigMapName, className)
+			expectConfigMap(nsName, addedConfigMapName, className)
+			expectManagedResource(className, addedConfigMapName)
+		})
+
+		It("should delete resources when a NamespaceClass loses a resource", func() {
+			className := uniqueName("remove-resource-class")
+			nsName := uniqueName("remove-resource-ns")
+			keptConfigMapName := uniqueName("kept-config")
+			removedConfigMapName := uniqueName("removed-config")
+			DeferCleanup(deleteNamespace, nsName)
+			DeferCleanup(deleteNamespaceClass, className)
+
+			_, err := applyYAML(namespaceClassManifest(className, keptConfigMapName, removedConfigMapName))
+			Expect(err).NotTo(HaveOccurred())
+			_, err = applyYAML(namespaceManifest(nsName, className))
+			Expect(err).NotTo(HaveOccurred())
+			expectConfigMap(nsName, keptConfigMapName, className)
+			expectConfigMap(nsName, removedConfigMapName, className)
+			expectManagedResource(className, removedConfigMapName)
+
+			_, err = applyYAML(namespaceClassManifest(className, keptConfigMapName))
+			Expect(err).NotTo(HaveOccurred())
+
+			expectConfigMap(nsName, keptConfigMapName, className)
+			expectNoConfigMap(nsName, removedConfigMapName)
+		})
+
+		It("should update resources when a NamespaceClass resource changes", func() {
+			className := uniqueName("update-resource-class")
+			nsName := uniqueName("update-resource-ns")
+			configMapName := uniqueName("updated-config")
+			DeferCleanup(deleteNamespace, nsName)
+			DeferCleanup(deleteNamespaceClass, className)
+
+			_, err := applyYAML(namespaceClassManifestWithConfigMaps(className, configMapResource{
+				name:  configMapName,
+				value: "old-value",
+			}))
+			Expect(err).NotTo(HaveOccurred())
+			_, err = applyYAML(namespaceManifest(nsName, className))
+			Expect(err).NotTo(HaveOccurred())
+			expectConfigMapData(nsName, configMapName, className, "old-value")
+
+			_, err = applyYAML(namespaceClassManifestWithConfigMaps(className, configMapResource{
+				name:  configMapName,
+				value: "new-value",
+			}))
+			Expect(err).NotTo(HaveOccurred())
+
+			expectConfigMapData(nsName, configMapName, className, "new-value")
+		})
+
 		It("should leave resources when a Namespace class annotation is removed", func() {
 			className := uniqueName("remove-class")
 			nsName := uniqueName("remove-ns")
@@ -449,19 +519,36 @@ func applyYAML(manifest string) (string, error) {
 	return utils.Run(exec.Command("kubectl", "apply", "-f", file.Name()))
 }
 
+type configMapResource struct {
+	name  string
+	value string
+}
+
 func namespaceClassManifest(name string, configMapNames ...string) string {
+	configMaps := make([]configMapResource, 0, len(configMapNames))
+	for _, configMapName := range configMapNames {
+		configMaps = append(configMaps, configMapResource{
+			name:  configMapName,
+			value: configMapName,
+		})
+	}
+
+	return namespaceClassManifestWithConfigMaps(name, configMaps...)
+}
+
+func namespaceClassManifestWithConfigMaps(name string, configMaps ...configMapResource) string {
 	resources := " []\n"
-	if len(configMapNames) > 0 {
+	if len(configMaps) > 0 {
 		var builder strings.Builder
 		builder.WriteString("\n")
-		for _, configMapName := range configMapNames {
+		for _, configMap := range configMaps {
 			builder.WriteString(fmt.Sprintf(`  - apiVersion: v1
     kind: ConfigMap
     metadata:
       name: %s
     data:
       key: %s
-`, configMapName, configMapName))
+`, configMap.name, configMap.value))
 		}
 		resources = builder.String()
 	}
@@ -490,6 +577,10 @@ metadata:
 }
 
 func expectConfigMap(namespaceName, configMapName, className string) {
+	expectConfigMapData(namespaceName, configMapName, className, configMapName)
+}
+
+func expectConfigMapData(namespaceName, configMapName, className, value string) {
 	Eventually(func(g Gomega) {
 		cmd := exec.Command(
 			"kubectl", "get", "configmap", configMapName,
@@ -498,7 +589,7 @@ func expectConfigMap(namespaceName, configMapName, className string) {
 		)
 		output, err := utils.Run(cmd)
 		g.Expect(err).NotTo(HaveOccurred())
-		g.Expect(strings.TrimSpace(output)).To(Equal(fmt.Sprintf("%s\nnsclass-controller\n%s", className, configMapName)))
+		g.Expect(strings.TrimSpace(output)).To(Equal(fmt.Sprintf("%s\nnsclass-controller\n%s", className, value)))
 	}, 2*time.Minute, time.Second).Should(Succeed())
 }
 
