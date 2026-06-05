@@ -39,6 +39,14 @@ spec:
           spec:
             description: spec defines the desired state of NamespaceClass
             properties:
+              removalPolicy:
+                default: Retain
+                description: removalPolicy controls what happens to managed resources
+                  when a Namespace stops referencing this class.
+                enum:
+                - Retain
+                - Delete
+                type: string
               resources:
                 description: |-
                   resources contains Kubernetes objects to create for namespaces using this class.

@@ -30,7 +30,24 @@ type NamespaceClassSpec struct {
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +optional
 	Resources []runtime.RawExtension `json:"resources,omitempty"`
+
+	// removalPolicy controls what happens to managed resources when a Namespace stops referencing this class.
+	// +kubebuilder:validation:Enum=Retain;Delete
+	// +kubebuilder:default=Retain
+	// +optional
+	RemovalPolicy NamespaceClassRemovalPolicy `json:"removalPolicy,omitempty"`
 }
+
+// NamespaceClassRemovalPolicy defines how managed resources are handled when a Namespace stops using a class.
+type NamespaceClassRemovalPolicy string
+
+const (
+	// NamespaceClassRemovalPolicyRetain leaves managed resources in place and removes them from status.
+	NamespaceClassRemovalPolicyRetain NamespaceClassRemovalPolicy = "Retain"
+
+	// NamespaceClassRemovalPolicyDelete deletes managed resources and removes them from status.
+	NamespaceClassRemovalPolicyDelete NamespaceClassRemovalPolicy = "Delete"
+)
 
 // NamespaceClassStatus defines the observed state of NamespaceClass.
 type NamespaceClassStatus struct {

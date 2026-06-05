@@ -664,19 +664,19 @@ data:
 			expectConfigMapData(nsName, configMapName, className, "new-value")
 		})
 
-		It("should leave resources when a Namespace class annotation is removed", func() {
-			className := uniqueName("remove-class")
-			nsName := uniqueName("remove-ns")
-			configMapName := uniqueName("remove-config")
+		It("should retain resources and remove them from status when a Namespace class annotation is removed", func() {
+			className := uniqueName("retain-class")
+			nsName := uniqueName("retain-ns")
+			configMapName := uniqueName("retain-config")
 			DeferCleanup(deleteNamespace, nsName)
 			DeferCleanup(deleteNamespaceClass, className)
 
-			_, err := applyYAML(namespaceClassManifest(className, configMapName))
+			_, err := applyYAML(namespaceClassManifestWithRemovalPolicy(className, "Retain", configMapName))
 			Expect(err).NotTo(HaveOccurred())
 			_, err = applyYAML(namespaceManifest(nsName, className))
 			Expect(err).NotTo(HaveOccurred())
 			expectConfigMap(nsName, configMapName, className)
-			expectManagedResource(className, configMapName)
+			expectManagedResourceInNamespace(className, nsName, configMapName)
 
 			_, err = utils.Run(exec.Command(
 				"kubectl", "annotate", "namespace", nsName,
@@ -689,6 +689,34 @@ data:
 				_, err := utils.Run(exec.Command("kubectl", "get", "configmap", configMapName, "-n", nsName))
 				g.Expect(err).NotTo(HaveOccurred())
 			}, 10*time.Second, time.Second).Should(Succeed())
+			expectNoManagedResourceInNamespace(className, nsName, configMapName)
+			expectManagedResourceCount(className, 0)
+		})
+
+		It("should delete resources and remove them from status when a Namespace class annotation is removed", func() {
+			className := uniqueName("delete-class")
+			nsName := uniqueName("delete-ns")
+			configMapName := uniqueName("delete-config")
+			DeferCleanup(deleteNamespace, nsName)
+			DeferCleanup(deleteNamespaceClass, className)
+
+			_, err := applyYAML(namespaceClassManifestWithRemovalPolicy(className, "Delete", configMapName))
+			Expect(err).NotTo(HaveOccurred())
+			_, err = applyYAML(namespaceManifest(nsName, className))
+			Expect(err).NotTo(HaveOccurred())
+			expectConfigMap(nsName, configMapName, className)
+			expectManagedResourceInNamespace(className, nsName, configMapName)
+
+			_, err = utils.Run(exec.Command(
+				"kubectl", "annotate", "namespace", nsName,
+				"namespaceclass.akuity.io/name-",
+				"--overwrite",
+			))
+			Expect(err).NotTo(HaveOccurred())
+
+			expectNoConfigMap(nsName, configMapName)
+			expectNoManagedResourceInNamespace(className, nsName, configMapName)
+			expectManagedResourceCount(className, 0)
 		})
 
 		It("should replace resources when a Namespace changes to a different NamespaceClass", func() {
@@ -763,6 +791,10 @@ type configMapResource struct {
 }
 
 func namespaceClassManifest(name string, configMapNames ...string) string {
+	return namespaceClassManifestWithRemovalPolicy(name, "", configMapNames...)
+}
+
+func namespaceClassManifestWithRemovalPolicy(name, removalPolicy string, configMapNames ...string) string {
 	configMaps := make([]configMapResource, 0, len(configMapNames))
 	for _, configMapName := range configMapNames {
 		configMaps = append(configMaps, configMapResource{
@@ -771,16 +803,24 @@ func namespaceClassManifest(name string, configMapNames ...string) string {
 		})
 	}
 
-	return namespaceClassManifestWithConfigMaps(name, configMaps...)
+	return namespaceClassManifestWithRemovalPolicyAndConfigMaps(name, removalPolicy, configMaps...)
 }
 
 func namespaceClassManifestWithConfigMaps(name string, configMaps ...configMapResource) string {
+	return namespaceClassManifestWithRemovalPolicyAndConfigMaps(name, "", configMaps...)
+}
+
+func namespaceClassManifestWithRemovalPolicyAndConfigMaps(
+	name string,
+	removalPolicy string,
+	configMaps ...configMapResource,
+) string {
 	resources := make([]string, 0, len(configMaps))
 	for _, configMap := range configMaps {
 		resources = append(resources, configMapResourceManifest(configMap))
 	}
 
-	return namespaceClassManifestWithResources(name, resources...)
+	return namespaceClassManifestWithRemovalPolicyAndResources(name, removalPolicy, resources...)
 }
 
 func configMapResourceManifest(configMap configMapResource) string {
@@ -794,6 +834,14 @@ func configMapResourceManifest(configMap configMapResource) string {
 }
 
 func namespaceClassManifestWithResources(name string, resourceManifests ...string) string {
+	return namespaceClassManifestWithRemovalPolicyAndResources(name, "", resourceManifests...)
+}
+
+func namespaceClassManifestWithRemovalPolicyAndResources(
+	name string,
+	removalPolicy string,
+	resourceManifests ...string,
+) string {
 	resources := " []\n"
 	if len(resourceManifests) > 0 {
 		var builder strings.Builder
@@ -804,12 +852,17 @@ func namespaceClassManifestWithResources(name string, resourceManifests ...strin
 		resources = builder.String()
 	}
 
+	policy := ""
+	if removalPolicy != "" {
+		policy = fmt.Sprintf("  removalPolicy: %s\n", removalPolicy)
+	}
+
 	return fmt.Sprintf(`apiVersion: nsclass.nsclass.laverya.com/v1alpha1
 kind: NamespaceClass
 metadata:
   name: %s
 spec:
-  resources:%s`, name, resources)
+%s  resources:%s`, name, policy, resources)
 }
 
 func namespaceManifest(name, className string) string {

@@ -78,7 +78,7 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	for _, stale := range staleManagedResources(namespaceClass.Status.ManagedResources, desiredResources) {
-		if !shouldDeleteManagedResource(stale, namespaceClassesByNamespace) {
+		if !shouldDeleteManagedResource(stale, namespaceClassesByNamespace, namespaceClassRemovalPolicy(namespaceClass)) {
 			continue
 		}
 		if err := r.deleteManagedResource(ctx, namespaceClass.Name, stale); err != nil {
@@ -173,10 +173,10 @@ func namespaceClassEventHandler() handler.EventHandler {
 			if oldClassName == newClassName {
 				return
 			}
+			enqueueNamespaceClassRequest(q, oldClassName)
 			if newClassName == "" {
 				return
 			}
-			enqueueNamespaceClassRequest(q, oldClassName)
 			enqueueNamespaceClassRequest(q, newClassName)
 		},
 		DeleteFunc: func(_ context.Context, e event.DeleteEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
@@ -370,16 +370,24 @@ func staleManagedResources(
 func shouldDeleteManagedResource(
 	resource nsclassv1alpha1.NamespaceClassManagedResource,
 	namespaceClassesByNamespace map[string]string,
+	removalPolicy nsclassv1alpha1.NamespaceClassRemovalPolicy,
 ) bool {
 	currentClassName, namespaceExists := namespaceClassesByNamespace[resource.Namespace]
 	if !namespaceExists {
 		return true
 	}
 	if currentClassName == "" {
-		return false
+		return removalPolicy == nsclassv1alpha1.NamespaceClassRemovalPolicyDelete
 	}
 
 	return true
+}
+
+func namespaceClassRemovalPolicy(namespaceClass *nsclassv1alpha1.NamespaceClass) nsclassv1alpha1.NamespaceClassRemovalPolicy {
+	if namespaceClass.Spec.RemovalPolicy == "" {
+		return nsclassv1alpha1.NamespaceClassRemovalPolicyRetain
+	}
+	return namespaceClass.Spec.RemovalPolicy
 }
 
 func managedResourceFromObject(obj *unstructured.Unstructured) nsclassv1alpha1.NamespaceClassManagedResource {
