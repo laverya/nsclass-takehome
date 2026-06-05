@@ -179,6 +179,9 @@ func namespaceClassEventHandler() handler.EventHandler {
 			enqueueNamespaceClassRequest(q, oldClassName)
 			enqueueNamespaceClassRequest(q, newClassName)
 		},
+		DeleteFunc: func(_ context.Context, e event.DeleteEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+			enqueueNamespaceClassRequest(q, namespaceClassName(e.Object))
+		},
 		GenericFunc: func(_ context.Context, e event.GenericEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 			enqueueNamespaceClassRequest(q, namespaceClassName(e.Object))
 		},

@@ -334,6 +334,244 @@ var _ = Describe("Manager", Ordered, func() {
 			expectConfigMap(nsName, configMapName, className)
 		})
 
+		It("should apply resources to every Namespace that references a NamespaceClass", func() {
+			className := uniqueName("multi-ns-class")
+			firstNamespaceName := uniqueName("multi-ns-first")
+			secondNamespaceName := uniqueName("multi-ns-second")
+			configMapName := uniqueName("multi-ns-config")
+			DeferCleanup(deleteNamespace, firstNamespaceName)
+			DeferCleanup(deleteNamespace, secondNamespaceName)
+			DeferCleanup(deleteNamespaceClass, className)
+
+			_, err := applyYAML(namespaceClassManifest(className, configMapName))
+			Expect(err).NotTo(HaveOccurred())
+			_, err = applyYAML(namespaceManifest(firstNamespaceName, className))
+			Expect(err).NotTo(HaveOccurred())
+			_, err = applyYAML(namespaceManifest(secondNamespaceName, className))
+			Expect(err).NotTo(HaveOccurred())
+
+			expectConfigMap(firstNamespaceName, configMapName, className)
+			expectConfigMap(secondNamespaceName, configMapName, className)
+			expectManagedResourceInNamespace(className, firstNamespaceName, configMapName)
+			expectManagedResourceInNamespace(className, secondNamespaceName, configMapName)
+			expectManagedResourceCount(className, 2)
+		})
+
+		It("should create resources when an existing Namespace starts using a NamespaceClass", func() {
+			className := uniqueName("late-class")
+			nsName := uniqueName("late-ns")
+			configMapName := uniqueName("late-config")
+			DeferCleanup(deleteNamespace, nsName)
+			DeferCleanup(deleteNamespaceClass, className)
+
+			_, err := applyYAML(namespaceManifest(nsName, ""))
+			Expect(err).NotTo(HaveOccurred())
+			_, err = applyYAML(namespaceClassManifest(className, configMapName))
+			Expect(err).NotTo(HaveOccurred())
+			expectNoConfigMapConsistently(nsName, configMapName)
+
+			_, err = utils.Run(exec.Command(
+				"kubectl", "annotate", "namespace", nsName,
+				fmt.Sprintf("namespaceclass.akuity.io/name=%s", className),
+				"--overwrite",
+			))
+			Expect(err).NotTo(HaveOccurred())
+
+			expectConfigMap(nsName, configMapName, className)
+		})
+
+		It("should remove managed resources from status when a Namespace is deleted", func() {
+			className := uniqueName("deleted-ns-class")
+			nsName := uniqueName("deleted-ns")
+			configMapName := uniqueName("deleted-ns-config")
+			DeferCleanup(deleteNamespaceClass, className)
+
+			_, err := applyYAML(namespaceClassManifest(className, configMapName))
+			Expect(err).NotTo(HaveOccurred())
+			_, err = applyYAML(namespaceManifest(nsName, className))
+			Expect(err).NotTo(HaveOccurred())
+			expectConfigMap(nsName, configMapName, className)
+			expectManagedResourceInNamespace(className, nsName, configMapName)
+
+			deleteNamespace(nsName)
+
+			expectNoManagedResourceInNamespace(className, nsName, configMapName)
+			expectManagedResourceCount(className, 0)
+		})
+
+		It("should create non-ConfigMap namespaced resources", func() {
+			className := uniqueName("secret-class")
+			nsName := uniqueName("secret-ns")
+			secretName := uniqueName("managed-secret")
+			DeferCleanup(deleteNamespace, nsName)
+			DeferCleanup(deleteNamespaceClass, className)
+
+			_, err := applyYAML(namespaceClassManifestWithResources(className, fmt.Sprintf(`  - apiVersion: v1
+    kind: Secret
+    metadata:
+      name: %s
+    type: Opaque
+    data:
+      key: dmFsdWU=
+`, secretName)))
+			Expect(err).NotTo(HaveOccurred())
+			_, err = applyYAML(namespaceManifest(nsName, className))
+			Expect(err).NotTo(HaveOccurred())
+
+			expectSecret(nsName, secretName, className, "dmFsdWU=")
+			expectManagedResourceInNamespace(className, nsName, secretName)
+		})
+
+		It("should not apply any resource when a NamespaceClass contains invalid resources", func() {
+			cases := []struct {
+				name            string
+				invalidResource string
+			}{
+				{
+					name: "missing-api-version",
+					invalidResource: `  - kind: ConfigMap
+    metadata:
+      name: invalid-config
+    data:
+      key: invalid
+`,
+				},
+				{
+					name: "missing-kind",
+					invalidResource: `  - apiVersion: v1
+    metadata:
+      name: invalid-config
+    data:
+      key: invalid
+`,
+				},
+				{
+					name: "missing-name",
+					invalidResource: `  - apiVersion: v1
+    kind: ConfigMap
+    data:
+      key: invalid
+`,
+				},
+				{
+					name: "cluster-scoped",
+					invalidResource: `  - apiVersion: v1
+    kind: Namespace
+    metadata:
+      name: invalid-namespace
+`,
+				},
+			}
+			created := make([]struct {
+				namespaceName string
+				configMapName string
+			}, 0, len(cases))
+
+			for _, tc := range cases {
+				className := uniqueName(tc.name)
+				nsName := uniqueName(tc.name + "-ns")
+				blockedConfigMapName := uniqueName(tc.name + "-blocked")
+				DeferCleanup(deleteNamespace, nsName)
+				DeferCleanup(deleteNamespaceClass, className)
+
+				_, err := applyYAML(namespaceClassManifestWithResources(
+					className,
+					tc.invalidResource,
+					configMapResourceManifest(configMapResource{
+						name:  blockedConfigMapName,
+						value: blockedConfigMapName,
+					}),
+				))
+				Expect(err).NotTo(HaveOccurred())
+				_, err = applyYAML(namespaceManifest(nsName, className))
+				Expect(err).NotTo(HaveOccurred())
+
+				created = append(created, struct {
+					namespaceName string
+					configMapName string
+				}{namespaceName: nsName, configMapName: blockedConfigMapName})
+			}
+
+			Consistently(func(g Gomega) {
+				for _, resource := range created {
+					_, err := utils.Run(exec.Command("kubectl", "get", "configmap", resource.configMapName, "-n", resource.namespaceName))
+					g.Expect(err).To(HaveOccurred())
+				}
+			}, 10*time.Second, time.Second).Should(Succeed())
+		})
+
+		It("should adopt and update pre-existing resources with the same name", func() {
+			className := uniqueName("existing-resource-class")
+			nsName := uniqueName("existing-resource-ns")
+			configMapName := uniqueName("existing-resource-config")
+			DeferCleanup(deleteNamespace, nsName)
+			DeferCleanup(deleteNamespaceClass, className)
+
+			_, err := applyYAML(namespaceManifest(nsName, ""))
+			Expect(err).NotTo(HaveOccurred())
+			_, err = applyYAML(fmt.Sprintf(`apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: %s
+  namespace: %s
+data:
+  existing: kept
+  key: old-value
+`, configMapName, nsName))
+			Expect(err).NotTo(HaveOccurred())
+			_, err = applyYAML(namespaceClassManifest(className, configMapName))
+			Expect(err).NotTo(HaveOccurred())
+
+			_, err = utils.Run(exec.Command(
+				"kubectl", "annotate", "namespace", nsName,
+				fmt.Sprintf("namespaceclass.akuity.io/name=%s", className),
+				"--overwrite",
+			))
+			Expect(err).NotTo(HaveOccurred())
+
+			expectConfigMapWithExistingData(nsName, configMapName, className, "kept")
+		})
+
+		It("should preserve resource metadata when adding management metadata", func() {
+			className := uniqueName("metadata-class")
+			nsName := uniqueName("metadata-ns")
+			configMapName := uniqueName("metadata-config")
+			DeferCleanup(deleteNamespace, nsName)
+			DeferCleanup(deleteNamespaceClass, className)
+
+			_, err := applyYAML(namespaceClassManifestWithResources(className, fmt.Sprintf(`  - apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: %s
+      annotations:
+        example.com/existing-annotation: kept
+      labels:
+        example.com/existing-label: kept
+    data:
+      key: %s
+`, configMapName, configMapName)))
+			Expect(err).NotTo(HaveOccurred())
+			_, err = applyYAML(namespaceManifest(nsName, className))
+			Expect(err).NotTo(HaveOccurred())
+
+			expectConfigMapMetadata(nsName, configMapName, className)
+		})
+
+		It("should create resources when a Namespace uses the NamespaceClass label", func() {
+			className := uniqueName("label-class")
+			nsName := uniqueName("label-ns")
+			configMapName := uniqueName("label-config")
+			DeferCleanup(deleteNamespace, nsName)
+			DeferCleanup(deleteNamespaceClass, className)
+
+			_, err := applyYAML(namespaceClassManifest(className, configMapName))
+			Expect(err).NotTo(HaveOccurred())
+			_, err = applyYAML(namespaceManifestWithClassLabel(nsName, className))
+			Expect(err).NotTo(HaveOccurred())
+
+			expectConfigMap(nsName, configMapName, className)
+		})
+
 		It("should create and delete resources when a NamespaceClass is updated", func() {
 			className := uniqueName("update-class")
 			nsName := uniqueName("update-ns")
@@ -537,18 +775,31 @@ func namespaceClassManifest(name string, configMapNames ...string) string {
 }
 
 func namespaceClassManifestWithConfigMaps(name string, configMaps ...configMapResource) string {
-	resources := " []\n"
-	if len(configMaps) > 0 {
-		var builder strings.Builder
-		builder.WriteString("\n")
-		for _, configMap := range configMaps {
-			builder.WriteString(fmt.Sprintf(`  - apiVersion: v1
+	resources := make([]string, 0, len(configMaps))
+	for _, configMap := range configMaps {
+		resources = append(resources, configMapResourceManifest(configMap))
+	}
+
+	return namespaceClassManifestWithResources(name, resources...)
+}
+
+func configMapResourceManifest(configMap configMapResource) string {
+	return fmt.Sprintf(`  - apiVersion: v1
     kind: ConfigMap
     metadata:
       name: %s
     data:
       key: %s
-`, configMap.name, configMap.value))
+`, configMap.name, configMap.value)
+}
+
+func namespaceClassManifestWithResources(name string, resourceManifests ...string) string {
+	resources := " []\n"
+	if len(resourceManifests) > 0 {
+		var builder strings.Builder
+		builder.WriteString("\n")
+		for _, resourceManifest := range resourceManifests {
+			builder.WriteString(resourceManifest)
 		}
 		resources = builder.String()
 	}
@@ -576,6 +827,16 @@ metadata:
 %s`, name, annotations)
 }
 
+func namespaceManifestWithClassLabel(name, className string) string {
+	return fmt.Sprintf(`apiVersion: v1
+kind: Namespace
+metadata:
+  name: %s
+  labels:
+    namespaceclass.akuity.io/name: %s
+`, name, className)
+}
+
 func expectConfigMap(namespaceName, configMapName, className string) {
 	expectConfigMapData(namespaceName, configMapName, className, configMapName)
 }
@@ -593,11 +854,57 @@ func expectConfigMapData(namespaceName, configMapName, className, value string) 
 	}, 2*time.Minute, time.Second).Should(Succeed())
 }
 
+func expectConfigMapWithExistingData(namespaceName, configMapName, className, existingValue string) {
+	Eventually(func(g Gomega) {
+		cmd := exec.Command(
+			"kubectl", "get", "configmap", configMapName,
+			"-n", namespaceName,
+			"-o", `go-template={{ index .metadata.annotations "namespaceclass.akuity.io/name" }}{{ "\n" }}{{ index .metadata.annotations "namespaceclass.akuity.io/managed-by" }}{{ "\n" }}{{ index .data "key" }}{{ "\n" }}{{ index .data "existing" }}`,
+		)
+		output, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(strings.TrimSpace(output)).To(Equal(fmt.Sprintf("%s\nnsclass-controller\n%s\n%s", className, configMapName, existingValue)))
+	}, 2*time.Minute, time.Second).Should(Succeed())
+}
+
+func expectConfigMapMetadata(namespaceName, configMapName, className string) {
+	Eventually(func(g Gomega) {
+		cmd := exec.Command(
+			"kubectl", "get", "configmap", configMapName,
+			"-n", namespaceName,
+			"-o", `go-template={{ index .metadata.annotations "namespaceclass.akuity.io/name" }}{{ "\n" }}{{ index .metadata.annotations "namespaceclass.akuity.io/managed-by" }}{{ "\n" }}{{ index .metadata.annotations "example.com/existing-annotation" }}{{ "\n" }}{{ index .metadata.labels "namespaceclass.akuity.io/name" }}{{ "\n" }}{{ index .metadata.labels "namespaceclass.akuity.io/managed-by" }}{{ "\n" }}{{ index .metadata.labels "example.com/existing-label" }}`,
+		)
+		output, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(strings.TrimSpace(output)).To(Equal(fmt.Sprintf("%s\nnsclass-controller\nkept\n%s\nnsclass-controller\nkept", className, className)))
+	}, 2*time.Minute, time.Second).Should(Succeed())
+}
+
+func expectSecret(namespaceName, secretName, className, value string) {
+	Eventually(func(g Gomega) {
+		cmd := exec.Command(
+			"kubectl", "get", "secret", secretName,
+			"-n", namespaceName,
+			"-o", `go-template={{ index .metadata.annotations "namespaceclass.akuity.io/name" }}{{ "\n" }}{{ index .metadata.annotations "namespaceclass.akuity.io/managed-by" }}{{ "\n" }}{{ index .data "key" }}`,
+		)
+		output, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(strings.TrimSpace(output)).To(Equal(fmt.Sprintf("%s\nnsclass-controller\n%s", className, value)))
+	}, 2*time.Minute, time.Second).Should(Succeed())
+}
+
 func expectNoConfigMap(namespaceName, configMapName string) {
 	Eventually(func(g Gomega) {
 		_, err := utils.Run(exec.Command("kubectl", "get", "configmap", configMapName, "-n", namespaceName))
 		g.Expect(err).To(HaveOccurred())
 	}, 2*time.Minute, time.Second).Should(Succeed())
+}
+
+func expectNoConfigMapConsistently(namespaceName, configMapName string) {
+	Consistently(func(g Gomega) {
+		_, err := utils.Run(exec.Command("kubectl", "get", "configmap", configMapName, "-n", namespaceName))
+		g.Expect(err).To(HaveOccurred())
+	}, 10*time.Second, time.Second).Should(Succeed())
 }
 
 func expectManagedResource(className, resourceName string) {
@@ -610,6 +917,38 @@ func expectManagedResource(className, resourceName string) {
 		g.Expect(err).NotTo(HaveOccurred())
 		g.Expect(strings.Fields(output)).To(ContainElement(resourceName))
 	}, 2*time.Minute, time.Second).Should(Succeed())
+}
+
+func expectManagedResourceInNamespace(className, namespaceName, resourceName string) {
+	Eventually(func(g Gomega) {
+		output, err := managedResourceRefs(className)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(strings.Fields(output)).To(ContainElement(fmt.Sprintf("%s/%s", namespaceName, resourceName)))
+	}, 2*time.Minute, time.Second).Should(Succeed())
+}
+
+func expectNoManagedResourceInNamespace(className, namespaceName, resourceName string) {
+	Eventually(func(g Gomega) {
+		output, err := managedResourceRefs(className)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(strings.Fields(output)).NotTo(ContainElement(fmt.Sprintf("%s/%s", namespaceName, resourceName)))
+	}, 2*time.Minute, time.Second).Should(Succeed())
+}
+
+func expectManagedResourceCount(className string, count int) {
+	Eventually(func(g Gomega) {
+		output, err := managedResourceRefs(className)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(strings.Fields(output)).To(HaveLen(count))
+	}, 2*time.Minute, time.Second).Should(Succeed())
+}
+
+func managedResourceRefs(className string) (string, error) {
+	cmd := exec.Command(
+		"kubectl", "get", "namespaceclass", className,
+		"-o", `jsonpath={range .status.managedResources[*]}{.namespace}/{.name}{"\n"}{end}`,
+	)
+	return utils.Run(cmd)
 }
 
 func deleteNamespace(name string) {
