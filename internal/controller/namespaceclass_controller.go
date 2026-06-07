@@ -32,6 +32,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -45,6 +46,7 @@ const (
 	namespaceClassManagedByAnnotation = "namespaceclass.akuity.io/managed-by"
 	namespaceClassManagedByValue      = "nsclass-controller"
 	namespaceClassFieldOwner          = "nsclass-controller"
+	namespaceClassFinalizer           = "namespaceclass.akuity.io/finalizer"
 )
 
 // NamespaceClassReconciler reconciles a NamespaceClass object
@@ -70,6 +72,19 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	namespaceClass := &nsclassv1alpha1.NamespaceClass{}
 	if err := r.Get(ctx, types.NamespacedName{Name: req.Name}, namespaceClass); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	if !namespaceClass.DeletionTimestamp.IsZero() {
+		if err := r.finalizeNamespaceClass(ctx, namespaceClass); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+
+	if controllerutil.AddFinalizer(namespaceClass, namespaceClassFinalizer) {
+		if err := r.Update(ctx, namespaceClass); err != nil {
+			return ctrl.Result{}, fmt.Errorf("add finalizer to NamespaceClass %q: %w", namespaceClass.Name, err)
+		}
 	}
 
 	desiredObjects, desiredResources, namespaceClassesByNamespace, err := r.desiredResources(ctx, namespaceClass)
@@ -99,6 +114,30 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	log.Info("Applied NamespaceClass resources", "namespaceClass", namespaceClass.Name, "resourceCount", len(desiredResources))
 
 	return ctrl.Result{}, nil
+}
+
+func (r *NamespaceClassReconciler) finalizeNamespaceClass(
+	ctx context.Context,
+	namespaceClass *nsclassv1alpha1.NamespaceClass,
+) error {
+	log := logf.FromContext(ctx)
+
+	resources := namespaceClass.Status.ManagedResources
+	for _, resource := range resources {
+		if err := r.deleteManagedResource(ctx, namespaceClass.Name, resource); err != nil {
+			return err
+		}
+	}
+
+	if controllerutil.RemoveFinalizer(namespaceClass, namespaceClassFinalizer) {
+		if err := r.Update(ctx, namespaceClass); err != nil {
+			return fmt.Errorf("remove finalizer from NamespaceClass %q: %w", namespaceClass.Name, err)
+		}
+	}
+
+	log.Info("Finalized NamespaceClass", "namespaceClass", namespaceClass.Name, "resourceCount", len(resources))
+
+	return nil
 }
 
 func (r *NamespaceClassReconciler) desiredResources(

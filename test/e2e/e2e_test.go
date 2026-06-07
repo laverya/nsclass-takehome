@@ -82,6 +82,9 @@ var _ = Describe("Manager", Ordered, func() {
 		cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace)
 		_, _ = utils.Run(cmd)
 
+		By("deleting NamespaceClasses before undeploying the controller")
+		deleteAllNamespaceClasses()
+
 		By("undeploying the controller-manager")
 		cmd = exec.Command("make", "undeploy")
 		_, _ = utils.Run(cmd)
@@ -397,6 +400,26 @@ var _ = Describe("Manager", Ordered, func() {
 
 			expectNoManagedResourceInNamespace(className, nsName, configMapName)
 			expectManagedResourceCount(className, 0)
+		})
+
+		It("should delete managed resources when a NamespaceClass is deleted", func() {
+			className := uniqueName("deleted-class")
+			nsName := uniqueName("deleted-class-ns")
+			configMapName := uniqueName("deleted-class-config")
+			DeferCleanup(deleteNamespace, nsName)
+			DeferCleanup(deleteNamespaceClass, className)
+
+			_, err := applyYAML(namespaceClassManifest(className, configMapName))
+			Expect(err).NotTo(HaveOccurred())
+			_, err = applyYAML(namespaceManifest(nsName, className))
+			Expect(err).NotTo(HaveOccurred())
+			expectConfigMap(nsName, configMapName, className)
+			expectManagedResourceInNamespace(className, nsName, configMapName)
+
+			deleteNamespaceClass(className)
+
+			expectNoConfigMap(nsName, configMapName)
+			expectNoNamespaceClass(className)
 		})
 
 		It("should create non-ConfigMap namespaced resources", func() {
@@ -960,6 +983,13 @@ func expectNoConfigMapConsistently(namespaceName, configMapName string) {
 	}, 10*time.Second, time.Second).Should(Succeed())
 }
 
+func expectNoNamespaceClass(className string) {
+	Eventually(func(g Gomega) {
+		_, err := utils.Run(exec.Command("kubectl", "get", "namespaceclass", className))
+		g.Expect(err).To(HaveOccurred())
+	}, 2*time.Minute, time.Second).Should(Succeed())
+}
+
 func expectManagedResource(className, resourceName string) {
 	Eventually(func(g Gomega) {
 		cmd := exec.Command(
@@ -1010,6 +1040,16 @@ func deleteNamespace(name string) {
 
 func deleteNamespaceClass(name string) {
 	_, _ = utils.Run(exec.Command("kubectl", "delete", "namespaceclass", name, "--ignore-not-found"))
+}
+
+func deleteAllNamespaceClasses() {
+	_, _ = utils.Run(exec.Command("kubectl", "delete", "namespaceclass", "--all", "--ignore-not-found"))
+
+	Eventually(func(g Gomega) {
+		output, err := utils.Run(exec.Command("kubectl", "get", "namespaceclass", "-o", "name"))
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(strings.TrimSpace(output)).To(BeEmpty())
+	}, 2*time.Minute, time.Second).Should(Succeed())
 }
 
 // serviceAccountToken returns a token for the specified service account in the given namespace.
