@@ -6,4 +6,21 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: namespaceclass-sample
 spec:
-  # TODO(user): Add fields here
+  removalPolicy: Delete
+  resources:
+  - apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: namespace-defaults
+    data:
+      profile: sample
+      owner: platform
+  - apiVersion: v1
+    kind: ResourceQuota
+    metadata:
+      name: namespace-quota
+    spec:
+      hard:
+        configmaps: "20"
+        secrets: "20"
+        pods: "20"

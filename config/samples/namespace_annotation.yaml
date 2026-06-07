@@ -1,0 +1,6 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nsclass-sample-annotation
+  annotations:
+    namespaceclass.akuity.io/name: namespaceclass-sample

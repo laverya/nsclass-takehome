@@ -1,4 +1,8 @@
-## Append samples of your project ##
 resources:
 - nsclass_v1alpha1_namespaceclass.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples
+
+# Apply namespace_label.yaml or namespace_annotation.yaml after the
+# NamespaceClass exists. The validating webhook rejects Namespaces that
+# reference a missing NamespaceClass, and kubectl/kustomize may apply
+# Namespace objects before custom resources in a single batch.

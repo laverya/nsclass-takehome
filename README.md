@@ -1,121 +1,170 @@
 # nsclass-controller
-// TODO(user): Add simple overview of use/purpose
 
-## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+`nsclass-controller` applies a shared set of namespace-scoped Kubernetes resources to every Namespace that opts in to a `NamespaceClass`.
 
-## Getting Started
+Use it when clusters need repeatable namespace defaults, such as baseline ConfigMaps, ResourceQuotas, LimitRanges, Secrets, Roles, or other namespaced objects. A platform team defines a cluster-scoped `NamespaceClass`; namespace owners select it with the `namespaceclass.akuity.io/name` label or annotation on their Namespace.
 
-### Prerequisites
-- go version v1.24.6+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
+## How It Works
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+1. Create a cluster-scoped `NamespaceClass`.
+2. Add `namespaceclass.akuity.io/name: <class-name>` to a Namespace label or annotation.
+3. The controller server-side applies every object in `spec.resources` into that Namespace.
+4. Managed objects receive these labels and annotations:
 
-```sh
-make docker-build docker-push IMG=<some-registry>/nsclass-controller:tag
+```yaml
+namespaceclass.akuity.io/name: <class-name>
+namespaceclass.akuity.io/managed-by: nsclass-controller
 ```
 
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
+If both a label and annotation are present on a Namespace, the label value is used.
 
-**Install the CRDs into the cluster:**
+The validating webhook rejects Namespace create and update requests that reference a missing `NamespaceClass`. Namespaces without a class reference are allowed.
 
-```sh
-make install
+## API
+
+```yaml
+apiVersion: nsclass.nsclass.laverya.com/v1alpha1
+kind: NamespaceClass
+metadata:
+  name: baseline
+spec:
+  removalPolicy: Delete
+  resources:
+    - apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: namespace-defaults
+      data:
+        profile: baseline
 ```
 
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
+`spec.resources` is a list of Kubernetes objects to apply into matching Namespaces.
+
+Each resource must:
+
+- Include `apiVersion`, `kind`, and `metadata.name`
+- Be namespace-scoped
+- Omit `metadata.namespace`, or accept that the controller overwrites it with the selected Namespace
+
+`spec.removalPolicy` controls what happens when an existing Namespace stops referencing a class:
+
+- `Retain` leaves managed resources in the Namespace and removes them from `status.managedResources`
+- `Delete` deletes managed resources and removes them from `status.managedResources`
+
+The default is `Retain`.
+
+Deleting a `NamespaceClass` deletes the resources it still tracks in status. Updating a `NamespaceClass` applies new resources, updates changed resources, and deletes resources removed from the class. If any resource in `spec.resources` is invalid, reconciliation fails before applying the class resources.
+
+## Quick Start
+
+Install cert-manager before deploying the default overlay. The default kustomize configuration enables the validating webhook and uses cert-manager to issue the webhook serving certificate.
+
+Build and push the controller image:
 
 ```sh
-make deploy IMG=<some-registry>/nsclass-controller:tag
+make docker-build docker-push IMG=<registry>/nsclass-controller:<tag>
 ```
 
-> **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
+Deploy the controller:
 
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
+```sh
+make deploy IMG=<registry>/nsclass-controller:<tag>
+```
+
+Apply the sample `NamespaceClass`:
 
 ```sh
 kubectl apply -k config/samples/
 ```
 
->**NOTE**: Ensure that the samples has default values to test it out.
-
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
+Apply a Namespace that selects the sample by label:
 
 ```sh
-kubectl delete -k config/samples/
+kubectl apply -f config/samples/namespace_label.yaml
 ```
 
-**Delete the APIs(CRDs) from the cluster:**
+Or apply a Namespace that selects the sample by annotation:
 
 ```sh
-make uninstall
+kubectl apply -f config/samples/namespace_annotation.yaml
 ```
 
-**UnDeploy the controller from the cluster:**
+Verify that the sample resources were created:
+
+```sh
+kubectl get configmap namespace-defaults -n nsclass-sample-label -o yaml
+kubectl get resourcequota namespace-quota -n nsclass-sample-label -o yaml
+kubectl get namespaceclass namespaceclass-sample \
+  -o jsonpath='{range .status.managedResources[*]}{.namespace}/{.kind}/{.name}{"\n"}{end}'
+```
+
+## Local Development
+
+Run unit tests:
+
+```sh
+make test
+```
+
+Run lint with automatic fixes:
+
+```sh
+make lint-fix
+```
+
+Run e2e tests against an isolated Kind cluster:
+
+```sh
+make test-e2e
+```
+
+The e2e target builds the controller image, loads it into Kind, deploys the controller, and validates webhook and reconciliation behavior. It is intended for an isolated test cluster, not a shared development or production cluster.
+
+## Uninstall
+
+Delete sample resources:
+
+```sh
+kubectl delete -f config/samples/namespace_label.yaml --ignore-not-found
+kubectl delete -f config/samples/namespace_annotation.yaml --ignore-not-found
+kubectl delete -k config/samples/ --ignore-not-found
+```
+
+Remove the controller:
 
 ```sh
 make undeploy
 ```
 
-## Project Distribution
-
-Following the options to release and provide this solution to the users.
-
-### By providing a bundle with all YAML files
-
-1. Build the installer for the image built and published in the registry:
+Remove the CRD:
 
 ```sh
-make build-installer IMG=<some-registry>/nsclass-controller:tag
+make uninstall
 ```
 
-**NOTE:** The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without its
-dependencies.
+## Distribution
 
-2. Using the installer
-
-Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
-the project, i.e.:
+Generate a single-install YAML bundle:
 
 ```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/nsclass-controller/<tag or branch>/dist/install.yaml
+make build-installer IMG=<registry>/nsclass-controller:<tag>
 ```
 
-### By providing a Helm Chart
+The generated bundle is written to `dist/install.yaml`.
 
-1. Build the chart using the optional helm plugin
+Install from a published bundle:
+
+```sh
+kubectl apply -f https://raw.githubusercontent.com/<org>/nsclass-controller/<tag>/dist/install.yaml
+```
+
+Generate a Helm chart with the Kubebuilder Helm plugin:
 
 ```sh
 kubebuilder edit --plugins=helm/v2-alpha
 ```
 
-2. See that a chart was generated under 'dist/chart', and users
-can obtain this solution from there.
-
-**NOTE:** If you change the project, you need to update the Helm Chart
-using the same command above to sync the latest changes. Furthermore,
-if you create webhooks, you need to use the above command with
-the '--force' flag and manually ensure that any custom configuration
-previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
-is manually re-applied afterwards.
-
-## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
-
-**NOTE:** Run `make help` for more information on all potential `make` targets
-
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
+If webhooks or manifests change after chart generation, regenerate the chart with `--force` and manually restore any chart customizations.
 
 ## License
 
@@ -132,4 +181,3 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-
