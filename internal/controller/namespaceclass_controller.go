@@ -18,12 +18,15 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -89,7 +92,12 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	desiredObjects, desiredResources, namespaceClassesByNamespace, err := r.desiredResources(ctx, namespaceClass)
 	if err != nil {
-		return ctrl.Result{}, err
+		return ctrl.Result{}, r.recordReconcileFailure(
+			ctx,
+			namespaceClass,
+			nsclassv1alpha1.NamespaceClassReasonResourcePreparationFailed,
+			err,
+		)
 	}
 
 	for _, stale := range staleManagedResources(namespaceClass.Status.ManagedResources, desiredResources) {
@@ -97,17 +105,27 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			continue
 		}
 		if err := r.deleteManagedResource(ctx, namespaceClass.Name, stale); err != nil {
-			return ctrl.Result{}, err
+			return ctrl.Result{}, r.recordReconcileFailure(
+				ctx,
+				namespaceClass,
+				nsclassv1alpha1.NamespaceClassReasonResourceCleanupFailed,
+				err,
+			)
 		}
 	}
 
 	for _, obj := range desiredObjects {
 		if err := r.applyResource(ctx, obj); err != nil {
-			return ctrl.Result{}, err
+			return ctrl.Result{}, r.recordReconcileFailure(
+				ctx,
+				namespaceClass,
+				nsclassv1alpha1.NamespaceClassReasonResourceApplyFailed,
+				err,
+			)
 		}
 	}
 
-	if err := r.updateManagedResourcesStatus(ctx, namespaceClass.Name, desiredResources); err != nil {
+	if err := r.updateManagedResourcesStatus(ctx, namespaceClass, desiredResources); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -380,23 +398,91 @@ func isManagedByNamespaceClass(obj client.Object, namespaceClassName string) boo
 // updateManagedResourcesStatus records the currently desired managed resources on the NamespaceClass status.
 func (r *NamespaceClassReconciler) updateManagedResourcesStatus(
 	ctx context.Context,
+	namespaceClass *nsclassv1alpha1.NamespaceClass,
+	resources []nsclassv1alpha1.NamespaceClassManagedResource,
+) error {
+	return r.updateNamespaceClassStatus(
+		ctx,
+		namespaceClass.Name,
+		resources,
+		true,
+		namespaceClassReadyCondition(
+			namespaceClass.Generation,
+			metav1.ConditionTrue,
+			nsclassv1alpha1.NamespaceClassReasonResourcesApplied,
+			fmt.Sprintf("Applied %d managed resources", len(resources)),
+		),
+	)
+}
+
+// recordReconcileFailure records a failing Ready condition and returns the original error.
+func (r *NamespaceClassReconciler) recordReconcileFailure(
+	ctx context.Context,
+	namespaceClass *nsclassv1alpha1.NamespaceClass,
+	reason string,
+	err error,
+) error {
+	statusErr := r.updateNamespaceClassStatus(
+		ctx,
+		namespaceClass.Name,
+		nil,
+		false,
+		namespaceClassReadyCondition(namespaceClass.Generation, metav1.ConditionFalse, reason, err.Error()),
+	)
+	return errors.Join(err, statusErr)
+}
+
+// updateNamespaceClassStatus updates managed resources and conditions from a freshly fetched NamespaceClass.
+func (r *NamespaceClassReconciler) updateNamespaceClassStatus(
+	ctx context.Context,
 	namespaceClassName string,
 	resources []nsclassv1alpha1.NamespaceClassManagedResource,
+	updateManagedResources bool,
+	condition metav1.Condition,
 ) error {
 	namespaceClass := &nsclassv1alpha1.NamespaceClass{}
 	if err := r.Get(ctx, types.NamespacedName{Name: namespaceClassName}, namespaceClass); err != nil {
 		return client.IgnoreNotFound(err)
 	}
-	if reflect.DeepEqual(namespaceClass.Status.ManagedResources, resources) {
+
+	originalManagedResources := append(
+		[]nsclassv1alpha1.NamespaceClassManagedResource(nil),
+		namespaceClass.Status.ManagedResources...,
+	)
+	originalConditions := append([]metav1.Condition(nil), namespaceClass.Status.Conditions...)
+
+	if updateManagedResources {
+		namespaceClass.Status.ManagedResources = resources
+	}
+	apimeta.SetStatusCondition(&namespaceClass.Status.Conditions, condition)
+
+	if reflect.DeepEqual(originalManagedResources, namespaceClass.Status.ManagedResources) &&
+		reflect.DeepEqual(originalConditions, namespaceClass.Status.Conditions) {
 		return nil
 	}
 
-	namespaceClass.Status.ManagedResources = resources
 	if err := r.Status().Update(ctx, namespaceClass); err != nil {
 		return fmt.Errorf("update NamespaceClass %q status: %w", namespaceClassName, err)
 	}
 
 	return nil
+}
+
+// namespaceClassReadyCondition constructs the Ready condition for NamespaceClass status.
+func namespaceClassReadyCondition(
+	observedGeneration int64,
+	status metav1.ConditionStatus,
+	reason string,
+	message string,
+) metav1.Condition {
+	return metav1.Condition{
+		Type:               nsclassv1alpha1.NamespaceClassConditionReady,
+		Status:             status,
+		ObservedGeneration: observedGeneration,
+		LastTransitionTime: metav1.Now(),
+		Reason:             reason,
+		Message:            message,
+	}
 }
 
 // staleManagedResources returns resources in current that are no longer present in desired.

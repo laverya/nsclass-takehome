@@ -49,6 +49,23 @@ const (
 	NamespaceClassRemovalPolicyDelete NamespaceClassRemovalPolicy = "Delete"
 )
 
+const (
+	// NamespaceClassConditionReady reports whether the NamespaceClass resources are reconciled.
+	NamespaceClassConditionReady = "Ready"
+
+	// NamespaceClassReasonResourcesApplied is used when resources are successfully reconciled.
+	NamespaceClassReasonResourcesApplied = "ResourcesApplied"
+
+	// NamespaceClassReasonResourcePreparationFailed is used when a template resource cannot be prepared.
+	NamespaceClassReasonResourcePreparationFailed = "ResourcePreparationFailed"
+
+	// NamespaceClassReasonResourceCleanupFailed is used when stale resources cannot be deleted.
+	NamespaceClassReasonResourceCleanupFailed = "ResourceCleanupFailed"
+
+	// NamespaceClassReasonResourceApplyFailed is used when a resource cannot be applied.
+	NamespaceClassReasonResourceApplyFailed = "ResourceApplyFailed"
+)
+
 // NamespaceClassStatus defines the observed state of NamespaceClass.
 type NamespaceClassStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster

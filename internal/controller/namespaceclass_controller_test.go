@@ -25,6 +25,7 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -184,6 +185,8 @@ var _ = Describe("NamespaceClass Controller", func() {
 			Expect(configMap.Annotations).To(HaveKeyWithValue("example.com/existing", "kept"))
 			Expect(configMap.Annotations).To(HaveKeyWithValue(namespaceClassManagedByAnnotation, namespaceClassManagedByValue))
 			Expect(configMap.Annotations).To(HaveKeyWithValue(namespaceClassNameKey, className))
+			expectReadyCondition(ctx, className, metav1.ConditionTrue, nsclassv1alpha1.NamespaceClassReasonResourcesApplied)
+			expectManagedResourceNames(ctx, className, configMapName)
 
 			unmatchedConfigMap := &corev1.ConfigMap{}
 			err = k8sClient.Get(ctx, types.NamespacedName{
@@ -218,9 +221,250 @@ var _ = Describe("NamespaceClass Controller", func() {
 				NamespacedName: types.NamespacedName{Name: className},
 			})
 			Expect(err).To(MatchError(ContainSubstring("is not namespace scoped")))
+			expectReadyCondition(
+				ctx,
+				className,
+				metav1.ConditionFalse,
+				nsclassv1alpha1.NamespaceClassReasonResourcePreparationFailed,
+			)
+		})
+
+		It("should create and delete resources when a NamespaceClass is updated", func() {
+			oldConfigMapName := "old-managed-config"
+			newConfigMapName := "new-managed-config"
+			namespaceClass := &nsclassv1alpha1.NamespaceClass{
+				ObjectMeta: metav1.ObjectMeta{Name: className},
+				Spec: nsclassv1alpha1.NamespaceClassSpec{
+					Resources: []runtime.RawExtension{
+						configMapResource(oldConfigMapName, "old-value"),
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, namespaceClass)).To(Succeed())
+			Expect(reconcileNamespaceClass(ctx, className)).To(Succeed())
+			expectConfigMapData(ctx, matchingNamespaceName, oldConfigMapName, "old-value")
+			expectManagedResourceNames(ctx, className, oldConfigMapName)
+
+			updatedNamespaceClass := &nsclassv1alpha1.NamespaceClass{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: className}, updatedNamespaceClass)).To(Succeed())
+			updatedNamespaceClass.Spec.Resources = []runtime.RawExtension{
+				configMapResource(newConfigMapName, "new-value"),
+			}
+			Expect(k8sClient.Update(ctx, updatedNamespaceClass)).To(Succeed())
+			Expect(reconcileNamespaceClass(ctx, className)).To(Succeed())
+
+			expectNoConfigMap(ctx, matchingNamespaceName, oldConfigMapName)
+			expectConfigMapData(ctx, matchingNamespaceName, newConfigMapName, "new-value")
+			expectManagedResourceNames(ctx, className, newConfigMapName)
+			expectReadyCondition(ctx, className, metav1.ConditionTrue, nsclassv1alpha1.NamespaceClassReasonResourcesApplied)
+		})
+
+		It("should replace resources when a Namespace changes to a different class", func() {
+			oldConfigMapName := "old-class-config"
+			newClassName := fmt.Sprintf("switch-test-%d", time.Now().UnixNano())
+			newConfigMapName := "new-class-config"
+			DeferCleanup(deleteIfExists, ctx, &nsclassv1alpha1.NamespaceClass{ObjectMeta: metav1.ObjectMeta{Name: newClassName}})
+
+			Expect(k8sClient.Create(ctx, &nsclassv1alpha1.NamespaceClass{
+				ObjectMeta: metav1.ObjectMeta{Name: className},
+				Spec: nsclassv1alpha1.NamespaceClassSpec{
+					Resources: []runtime.RawExtension{
+						configMapResource(oldConfigMapName, "old-value"),
+					},
+				},
+			})).To(Succeed())
+			Expect(k8sClient.Create(ctx, &nsclassv1alpha1.NamespaceClass{
+				ObjectMeta: metav1.ObjectMeta{Name: newClassName},
+				Spec: nsclassv1alpha1.NamespaceClassSpec{
+					Resources: []runtime.RawExtension{
+						configMapResource(newConfigMapName, "new-value"),
+					},
+				},
+			})).To(Succeed())
+			Expect(reconcileNamespaceClass(ctx, className)).To(Succeed())
+			expectConfigMapData(ctx, matchingNamespaceName, oldConfigMapName, "old-value")
+
+			namespace := &corev1.Namespace{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: matchingNamespaceName}, namespace)).To(Succeed())
+			namespace.Labels[namespaceClassNameKey] = newClassName
+			Expect(k8sClient.Update(ctx, namespace)).To(Succeed())
+
+			Expect(reconcileNamespaceClass(ctx, className)).To(Succeed())
+			Expect(reconcileNamespaceClass(ctx, newClassName)).To(Succeed())
+
+			expectNoConfigMap(ctx, matchingNamespaceName, oldConfigMapName)
+			expectConfigMapData(ctx, matchingNamespaceName, newConfigMapName, "new-value")
+			expectManagedResourceNames(ctx, className)
+			expectManagedResourceNames(ctx, newClassName, newConfigMapName)
+		})
+
+		It("should retain or delete resources when a Namespace stops using a class", func() {
+			cases := []struct {
+				name          string
+				removalPolicy nsclassv1alpha1.NamespaceClassRemovalPolicy
+				expectDeleted bool
+			}{
+				{
+					name:          "retain",
+					removalPolicy: nsclassv1alpha1.NamespaceClassRemovalPolicyRetain,
+					expectDeleted: false,
+				},
+				{
+					name:          "delete",
+					removalPolicy: nsclassv1alpha1.NamespaceClassRemovalPolicyDelete,
+					expectDeleted: true,
+				},
+			}
+
+			for _, tc := range cases {
+				namespaceClassName := fmt.Sprintf("%s-%s", className, tc.name)
+				namespaceName := fmt.Sprintf("%s-%s", matchingNamespaceName, tc.name)
+				configMapName := fmt.Sprintf("%s-config", tc.name)
+				DeferCleanup(deleteIfExists, ctx, &nsclassv1alpha1.NamespaceClass{
+					ObjectMeta: metav1.ObjectMeta{Name: namespaceClassName},
+				})
+				DeferCleanup(deleteIfExists, ctx, &corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{Name: namespaceName},
+				})
+
+				Expect(k8sClient.Create(ctx, namespaceWithLabels(namespaceName, map[string]string{
+					namespaceClassNameKey: namespaceClassName,
+				}))).To(Succeed())
+				Expect(k8sClient.Create(ctx, &nsclassv1alpha1.NamespaceClass{
+					ObjectMeta: metav1.ObjectMeta{Name: namespaceClassName},
+					Spec: nsclassv1alpha1.NamespaceClassSpec{
+						RemovalPolicy: tc.removalPolicy,
+						Resources: []runtime.RawExtension{
+							configMapResource(configMapName, tc.name),
+						},
+					},
+				})).To(Succeed())
+				Expect(reconcileNamespaceClass(ctx, namespaceClassName)).To(Succeed())
+				expectConfigMapData(ctx, namespaceName, configMapName, tc.name)
+
+				namespace := &corev1.Namespace{}
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: namespaceName}, namespace)).To(Succeed())
+				delete(namespace.Labels, namespaceClassNameKey)
+				Expect(k8sClient.Update(ctx, namespace)).To(Succeed())
+				Expect(reconcileNamespaceClass(ctx, namespaceClassName)).To(Succeed())
+
+				if tc.expectDeleted {
+					expectNoConfigMap(ctx, namespaceName, configMapName)
+				} else {
+					expectConfigMapData(ctx, namespaceName, configMapName, tc.name)
+				}
+				expectManagedResourceNames(ctx, namespaceClassName)
+			}
+		})
+
+		It("should not apply any resources and should mark Ready false when a class has an invalid resource", func() {
+			validConfigMapName := "must-not-apply"
+			namespaceClass := &nsclassv1alpha1.NamespaceClass{
+				ObjectMeta: metav1.ObjectMeta{Name: className},
+				Spec: nsclassv1alpha1.NamespaceClassSpec{
+					Resources: []runtime.RawExtension{
+						{
+							Raw: []byte(`{
+								"apiVersion": "v1",
+								"kind": "Namespace",
+								"metadata": {
+									"name": "invalid-cluster-resource"
+								}
+							}`),
+						},
+						configMapResource(validConfigMapName, "blocked"),
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, namespaceClass)).To(Succeed())
+
+			err := reconcileNamespaceClass(ctx, className)
+			Expect(err).To(MatchError(ContainSubstring("is not namespace scoped")))
+			expectNoConfigMap(ctx, matchingNamespaceName, validConfigMapName)
+			expectReadyCondition(
+				ctx,
+				className,
+				metav1.ConditionFalse,
+				nsclassv1alpha1.NamespaceClassReasonResourcePreparationFailed,
+			)
+			expectManagedResourceNames(ctx, className)
 		})
 	})
 })
+
+func reconcileNamespaceClass(ctx context.Context, className string) error {
+	controllerReconciler := &NamespaceClassReconciler{
+		Client: k8sClient,
+		Scheme: k8sClient.Scheme(),
+	}
+	_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: className},
+	})
+	return err
+}
+
+func configMapResource(name, value string) runtime.RawExtension {
+	return runtime.RawExtension{
+		Raw: []byte(fmt.Sprintf(`{
+			"apiVersion": "v1",
+			"kind": "ConfigMap",
+			"metadata": {
+				"name": %q
+			},
+			"data": {
+				"key": %q
+			}
+		}`, name, value)),
+	}
+}
+
+func expectConfigMapData(ctx context.Context, namespaceName, configMapName, value string) {
+	configMap := &corev1.ConfigMap{}
+	Expect(k8sClient.Get(ctx, types.NamespacedName{
+		Namespace: namespaceName,
+		Name:      configMapName,
+	}, configMap)).To(Succeed())
+	Expect(configMap.Data).To(HaveKeyWithValue("key", value))
+}
+
+func expectNoConfigMap(ctx context.Context, namespaceName, configMapName string) {
+	configMap := &corev1.ConfigMap{}
+	err := k8sClient.Get(ctx, types.NamespacedName{
+		Namespace: namespaceName,
+		Name:      configMapName,
+	}, configMap)
+	Expect(errors.IsNotFound(err)).To(BeTrue())
+}
+
+func expectManagedResourceNames(ctx context.Context, className string, names ...string) {
+	namespaceClass := &nsclassv1alpha1.NamespaceClass{}
+	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: className}, namespaceClass)).To(Succeed())
+
+	actualNames := make([]string, 0, len(namespaceClass.Status.ManagedResources))
+	for _, resource := range namespaceClass.Status.ManagedResources {
+		actualNames = append(actualNames, resource.Name)
+	}
+	Expect(actualNames).To(ConsistOf(names))
+}
+
+func expectReadyCondition(
+	ctx context.Context,
+	className string,
+	status metav1.ConditionStatus,
+	reason string,
+) {
+	namespaceClass := &nsclassv1alpha1.NamespaceClass{}
+	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: className}, namespaceClass)).To(Succeed())
+
+	condition := apimeta.FindStatusCondition(
+		namespaceClass.Status.Conditions,
+		nsclassv1alpha1.NamespaceClassConditionReady,
+	)
+	Expect(condition).NotTo(BeNil())
+	Expect(condition.Status).To(Equal(status))
+	Expect(condition.Reason).To(Equal(reason))
+	Expect(condition.ObservedGeneration).To(Equal(namespaceClass.Generation))
+}
 
 func namespaceWithClass(className string) *corev1.Namespace {
 	if className == "" {
