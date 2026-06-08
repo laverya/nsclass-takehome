@@ -404,17 +404,19 @@ func reconcileNamespaceClass(ctx context.Context, className string) error {
 }
 
 func configMapResource(name, value string) runtime.RawExtension {
+	raw := fmt.Appendf(nil, `{
+		"apiVersion": "v1",
+		"kind": "ConfigMap",
+		"metadata": {
+			"name": %q
+		},
+		"data": {
+			"key": %q
+		}
+	}`, name, value)
+
 	return runtime.RawExtension{
-		Raw: []byte(fmt.Sprintf(`{
-			"apiVersion": "v1",
-			"kind": "ConfigMap",
-			"metadata": {
-				"name": %q
-			},
-			"data": {
-				"key": %q
-			}
-		}`, name, value)),
+		Raw: raw,
 	}
 }
 
