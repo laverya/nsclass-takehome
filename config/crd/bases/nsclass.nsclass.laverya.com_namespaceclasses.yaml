@@ -15,7 +15,7 @@ spec:
   scope: Cluster
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+    - jsonPath: .status.phase
       name: Status
       type: string
     - jsonPath: .status.resourceCount
@@ -180,6 +180,14 @@ spec:
                   selecting this NamespaceClass.
                 format: int32
                 type: integer
+              phase:
+                description: phase summarizes the current NamespaceClass state for
+                  human-readable status output.
+                enum:
+                - Ready
+                - NotReady
+                - Unknown
+                type: string
               resourceCount:
                 description: resourceCount is the number of resource templates defined
                   in spec.resources.

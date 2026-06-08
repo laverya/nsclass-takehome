@@ -480,9 +480,11 @@ func (r *NamespaceClassReconciler) updateNamespaceClassStatus(
 		namespaceClass.Status.ManagedResources...,
 	)
 	originalConditions := append([]metav1.Condition(nil), namespaceClass.Status.Conditions...)
+	originalPhase := namespaceClass.Status.Phase
 	originalResourceCount := namespaceClass.Status.ResourceCount
 	originalNamespaceCount := namespaceClass.Status.NamespaceCount
 
+	namespaceClass.Status.Phase = namespaceClassPhaseForCondition(condition)
 	namespaceClass.Status.ResourceCount = resourceCount
 	namespaceClass.Status.NamespaceCount = namespaceCount
 	if updateManagedResources {
@@ -492,6 +494,7 @@ func (r *NamespaceClassReconciler) updateNamespaceClassStatus(
 
 	if reflect.DeepEqual(originalManagedResources, namespaceClass.Status.ManagedResources) &&
 		reflect.DeepEqual(originalConditions, namespaceClass.Status.Conditions) &&
+		originalPhase == namespaceClass.Status.Phase &&
 		originalResourceCount == namespaceClass.Status.ResourceCount &&
 		originalNamespaceCount == namespaceClass.Status.NamespaceCount {
 		return nil
@@ -502,6 +505,18 @@ func (r *NamespaceClassReconciler) updateNamespaceClassStatus(
 	}
 
 	return nil
+}
+
+// namespaceClassPhaseForCondition returns a human-readable status summary for the Ready condition.
+func namespaceClassPhaseForCondition(condition metav1.Condition) nsclassv1alpha1.NamespaceClassPhase {
+	switch condition.Status {
+	case metav1.ConditionTrue:
+		return nsclassv1alpha1.NamespaceClassPhaseReady
+	case metav1.ConditionFalse:
+		return nsclassv1alpha1.NamespaceClassPhaseNotReady
+	default:
+		return nsclassv1alpha1.NamespaceClassPhaseUnknown
+	}
 }
 
 // namespaceClassReadyCondition constructs the Ready condition for NamespaceClass status.

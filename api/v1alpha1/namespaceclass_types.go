@@ -66,6 +66,20 @@ const (
 	NamespaceClassReasonResourceApplyFailed = "ResourceApplyFailed"
 )
 
+// NamespaceClassPhase summarizes the NamespaceClass state for human-readable status output.
+type NamespaceClassPhase string
+
+const (
+	// NamespaceClassPhaseReady indicates the NamespaceClass is reconciled.
+	NamespaceClassPhaseReady NamespaceClassPhase = "Ready"
+
+	// NamespaceClassPhaseNotReady indicates the NamespaceClass is not reconciled.
+	NamespaceClassPhaseNotReady NamespaceClassPhase = "NotReady"
+
+	// NamespaceClassPhaseUnknown indicates the NamespaceClass state is unknown.
+	NamespaceClassPhaseUnknown NamespaceClassPhase = "Unknown"
+)
+
 // NamespaceClassStatus defines the observed state of NamespaceClass.
 type NamespaceClassStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
@@ -73,6 +87,11 @@ type NamespaceClassStatus struct {
 
 	// For Kubernetes API conventions, see:
 	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
+
+	// phase summarizes the current NamespaceClass state for human-readable status output.
+	// +kubebuilder:validation:Enum=Ready;NotReady;Unknown
+	// +optional
+	Phase NamespaceClassPhase `json:"phase,omitempty"`
 
 	// resourceCount is the number of resource templates defined in spec.resources.
 	// +optional
@@ -128,7 +147,7 @@ type NamespaceClassManagedResource struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster
-// +kubebuilder:printcolumn:name="Status",type=string,JSONPath=".status.conditions[?(@.type=='Ready')].status"
+// +kubebuilder:printcolumn:name="Status",type=string,JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="Resources",type=integer,JSONPath=".status.resourceCount"
 // +kubebuilder:printcolumn:name="Namespaces",type=integer,JSONPath=".status.namespaceCount"
 // +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=".status.conditions[?(@.type=='Ready')].reason",priority=1
