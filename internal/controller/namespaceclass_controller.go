@@ -90,46 +90,59 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 	}
 
-	desiredObjects, desiredResources, namespaceClassesByNamespace, err := r.desiredResources(ctx, namespaceClass)
+	desired, err := r.desiredResources(ctx, namespaceClass)
 	if err != nil {
 		return ctrl.Result{}, r.recordReconcileFailure(
 			ctx,
 			namespaceClass,
+			desired.NamespaceCount,
 			nsclassv1alpha1.NamespaceClassReasonResourcePreparationFailed,
 			err,
 		)
 	}
 
-	for _, stale := range staleManagedResources(namespaceClass.Status.ManagedResources, desiredResources) {
-		if !shouldDeleteManagedResource(stale, namespaceClassesByNamespace, namespaceClassRemovalPolicy(namespaceClass)) {
+	for _, stale := range staleManagedResources(namespaceClass.Status.ManagedResources, desired.ManagedResources) {
+		if !shouldDeleteManagedResource(stale, desired.NamespaceClassesByNamespace, namespaceClassRemovalPolicy(namespaceClass)) {
 			continue
 		}
 		if err := r.deleteManagedResource(ctx, namespaceClass.Name, stale); err != nil {
 			return ctrl.Result{}, r.recordReconcileFailure(
 				ctx,
 				namespaceClass,
+				desired.NamespaceCount,
 				nsclassv1alpha1.NamespaceClassReasonResourceCleanupFailed,
 				err,
 			)
 		}
 	}
 
-	for _, obj := range desiredObjects {
+	for _, obj := range desired.Objects {
 		if err := r.applyResource(ctx, obj); err != nil {
 			return ctrl.Result{}, r.recordReconcileFailure(
 				ctx,
 				namespaceClass,
+				desired.NamespaceCount,
 				nsclassv1alpha1.NamespaceClassReasonResourceApplyFailed,
 				err,
 			)
 		}
 	}
 
-	if err := r.updateManagedResourcesStatus(ctx, namespaceClass, desiredResources); err != nil {
+	if err := r.updateManagedResourcesStatus(ctx, namespaceClass, desired.ManagedResources, desired.NamespaceCount); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	log.Info("Applied NamespaceClass resources", "namespaceClass", namespaceClass.Name, "resourceCount", len(desiredResources))
+	log.Info(
+		"Applied NamespaceClass resources",
+		"namespaceClass",
+		namespaceClass.Name,
+		"resourceCount",
+		len(namespaceClass.Spec.Resources),
+		"namespaceCount",
+		desired.NamespaceCount,
+		"managedResourceCount",
+		len(desired.ManagedResources),
+	)
 
 	return ctrl.Result{}, nil
 }
@@ -159,45 +172,54 @@ func (r *NamespaceClassReconciler) finalizeNamespaceClass(
 	return nil
 }
 
+type namespaceClassDesiredResources struct {
+	Objects                     []*unstructured.Unstructured
+	ManagedResources            []nsclassv1alpha1.NamespaceClassManagedResource
+	NamespaceClassesByNamespace map[string]string
+	NamespaceCount              int32
+}
+
 // desiredResources builds the desired objects and status entries for namespaces that select the NamespaceClass.
 func (r *NamespaceClassReconciler) desiredResources(
 	ctx context.Context,
 	namespaceClass *nsclassv1alpha1.NamespaceClass,
-) (
-	[]*unstructured.Unstructured,
-	[]nsclassv1alpha1.NamespaceClassManagedResource,
-	map[string]string,
-	error,
-) {
+) (namespaceClassDesiredResources, error) {
+	desired := namespaceClassDesiredResources{
+		NamespaceClassesByNamespace: map[string]string{},
+	}
+
 	namespaces := &corev1.NamespaceList{}
 	if err := r.List(ctx, namespaces); err != nil {
-		return nil, nil, nil, fmt.Errorf("list namespaces for NamespaceClass %q: %w", namespaceClass.Name, err)
+		return desired, fmt.Errorf("list namespaces for NamespaceClass %q: %w", namespaceClass.Name, err)
 	}
 
-	var objects []*unstructured.Unstructured
-	var resources []nsclassv1alpha1.NamespaceClassManagedResource
-	namespaceClassesByNamespace := map[string]string{}
+	var selectedNamespaceNames []string
 	for i := range namespaces.Items {
 		namespace := &namespaces.Items[i]
-		namespaceClassesByNamespace[namespace.Name] = namespaceClassName(namespace)
-		if namespaceClassesByNamespace[namespace.Name] != namespaceClass.Name {
+		selectedClassName := namespaceClassName(namespace)
+		desired.NamespaceClassesByNamespace[namespace.Name] = selectedClassName
+		if selectedClassName != namespaceClass.Name {
 			continue
 		}
+		selectedNamespaceNames = append(selectedNamespaceNames, namespace.Name)
+	}
+	desired.NamespaceCount = int32(len(selectedNamespaceNames))
 
+	for _, namespaceName := range selectedNamespaceNames {
 		for j, resource := range namespaceClass.Spec.Resources {
-			obj, err := r.resourceForNamespace(resource, namespaceClass.Name, namespace.Name)
+			obj, err := r.resourceForNamespace(resource, namespaceClass.Name, namespaceName)
 			if err != nil {
-				return nil, nil, nil, fmt.Errorf("prepare spec.resources[%d] for NamespaceClass %q: %w", j, namespaceClass.Name, err)
+				return desired, fmt.Errorf("prepare spec.resources[%d] for NamespaceClass %q: %w", j, namespaceClass.Name, err)
 			}
 
-			objects = append(objects, obj)
-			resources = append(resources, managedResourceFromObject(obj))
+			desired.Objects = append(desired.Objects, obj)
+			desired.ManagedResources = append(desired.ManagedResources, managedResourceFromObject(obj))
 		}
 	}
 
-	sortManagedResources(resources)
+	sortManagedResources(desired.ManagedResources)
 
-	return objects, resources, namespaceClassesByNamespace, nil
+	return desired, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -400,12 +422,15 @@ func (r *NamespaceClassReconciler) updateManagedResourcesStatus(
 	ctx context.Context,
 	namespaceClass *nsclassv1alpha1.NamespaceClass,
 	resources []nsclassv1alpha1.NamespaceClassManagedResource,
+	namespaceCount int32,
 ) error {
 	return r.updateNamespaceClassStatus(
 		ctx,
 		namespaceClass.Name,
 		resources,
 		true,
+		int32(len(namespaceClass.Spec.Resources)),
+		namespaceCount,
 		namespaceClassReadyCondition(
 			namespaceClass.Generation,
 			metav1.ConditionTrue,
@@ -419,6 +444,7 @@ func (r *NamespaceClassReconciler) updateManagedResourcesStatus(
 func (r *NamespaceClassReconciler) recordReconcileFailure(
 	ctx context.Context,
 	namespaceClass *nsclassv1alpha1.NamespaceClass,
+	namespaceCount int32,
 	reason string,
 	err error,
 ) error {
@@ -427,6 +453,8 @@ func (r *NamespaceClassReconciler) recordReconcileFailure(
 		namespaceClass.Name,
 		nil,
 		false,
+		int32(len(namespaceClass.Spec.Resources)),
+		namespaceCount,
 		namespaceClassReadyCondition(namespaceClass.Generation, metav1.ConditionFalse, reason, err.Error()),
 	)
 	return errors.Join(err, statusErr)
@@ -438,6 +466,8 @@ func (r *NamespaceClassReconciler) updateNamespaceClassStatus(
 	namespaceClassName string,
 	resources []nsclassv1alpha1.NamespaceClassManagedResource,
 	updateManagedResources bool,
+	resourceCount int32,
+	namespaceCount int32,
 	condition metav1.Condition,
 ) error {
 	namespaceClass := &nsclassv1alpha1.NamespaceClass{}
@@ -450,14 +480,20 @@ func (r *NamespaceClassReconciler) updateNamespaceClassStatus(
 		namespaceClass.Status.ManagedResources...,
 	)
 	originalConditions := append([]metav1.Condition(nil), namespaceClass.Status.Conditions...)
+	originalResourceCount := namespaceClass.Status.ResourceCount
+	originalNamespaceCount := namespaceClass.Status.NamespaceCount
 
+	namespaceClass.Status.ResourceCount = resourceCount
+	namespaceClass.Status.NamespaceCount = namespaceCount
 	if updateManagedResources {
 		namespaceClass.Status.ManagedResources = resources
 	}
 	apimeta.SetStatusCondition(&namespaceClass.Status.Conditions, condition)
 
 	if reflect.DeepEqual(originalManagedResources, namespaceClass.Status.ManagedResources) &&
-		reflect.DeepEqual(originalConditions, namespaceClass.Status.Conditions) {
+		reflect.DeepEqual(originalConditions, namespaceClass.Status.Conditions) &&
+		originalResourceCount == namespaceClass.Status.ResourceCount &&
+		originalNamespaceCount == namespaceClass.Status.NamespaceCount {
 		return nil
 	}
 

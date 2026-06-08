@@ -14,7 +14,21 @@ spec:
     singular: namespaceclass
   scope: Cluster
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Status
+      type: string
+    - jsonPath: .status.resourceCount
+      name: Resources
+      type: integer
+    - jsonPath: .status.namespaceCount
+      name: Namespaces
+      type: integer
+    - jsonPath: .status.conditions[?(@.type=='Ready')].reason
+      name: Reason
+      priority: 1
+      type: string
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: NamespaceClass is the Schema for the namespaceclasses API
@@ -161,6 +175,16 @@ spec:
                 - namespace
                 - name
                 x-kubernetes-list-type: map
+              namespaceCount:
+                description: namespaceCount is the number of Namespaces currently
+                  selecting this NamespaceClass.
+                format: int32
+                type: integer
+              resourceCount:
+                description: resourceCount is the number of resource templates defined
+                  in spec.resources.
+                format: int32
+                type: integer
             type: object
         required:
         - spec

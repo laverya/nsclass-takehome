@@ -74,6 +74,14 @@ type NamespaceClassStatus struct {
 	// For Kubernetes API conventions, see:
 	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
 
+	// resourceCount is the number of resource templates defined in spec.resources.
+	// +optional
+	ResourceCount int32 `json:"resourceCount,omitempty"`
+
+	// namespaceCount is the number of Namespaces currently selecting this NamespaceClass.
+	// +optional
+	NamespaceCount int32 `json:"namespaceCount,omitempty"`
+
 	// conditions represent the current state of the NamespaceClass resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
 	//
@@ -120,6 +128,10 @@ type NamespaceClassManagedResource struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster
+// +kubebuilder:printcolumn:name="Status",type=string,JSONPath=".status.conditions[?(@.type=='Ready')].status"
+// +kubebuilder:printcolumn:name="Resources",type=integer,JSONPath=".status.resourceCount"
+// +kubebuilder:printcolumn:name="Namespaces",type=integer,JSONPath=".status.namespaceCount"
+// +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=".status.conditions[?(@.type=='Ready')].reason",priority=1
 
 // NamespaceClass is the Schema for the namespaceclasses API
 type NamespaceClass struct {

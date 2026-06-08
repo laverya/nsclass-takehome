@@ -186,6 +186,7 @@ var _ = Describe("NamespaceClass Controller", func() {
 			Expect(configMap.Annotations).To(HaveKeyWithValue(namespaceClassManagedByAnnotation, namespaceClassManagedByValue))
 			Expect(configMap.Annotations).To(HaveKeyWithValue(namespaceClassNameKey, className))
 			expectReadyCondition(ctx, className, metav1.ConditionTrue, nsclassv1alpha1.NamespaceClassReasonResourcesApplied)
+			expectStatusCounts(ctx, className, 1, 1)
 			expectManagedResourceNames(ctx, className, configMapName)
 
 			unmatchedConfigMap := &corev1.ConfigMap{}
@@ -296,6 +297,8 @@ var _ = Describe("NamespaceClass Controller", func() {
 			expectConfigMapData(ctx, matchingNamespaceName, newConfigMapName, "new-value")
 			expectManagedResourceNames(ctx, className)
 			expectManagedResourceNames(ctx, newClassName, newConfigMapName)
+			expectStatusCounts(ctx, className, 1, 0)
+			expectStatusCounts(ctx, newClassName, 1, 1)
 		})
 
 		It("should retain or delete resources when a Namespace stops using a class", func() {
@@ -387,6 +390,7 @@ var _ = Describe("NamespaceClass Controller", func() {
 				metav1.ConditionFalse,
 				nsclassv1alpha1.NamespaceClassReasonResourcePreparationFailed,
 			)
+			expectStatusCounts(ctx, className, 2, 1)
 			expectManagedResourceNames(ctx, className)
 		})
 	})
@@ -447,6 +451,14 @@ func expectManagedResourceNames(ctx context.Context, className string, names ...
 		actualNames = append(actualNames, resource.Name)
 	}
 	Expect(actualNames).To(ConsistOf(names))
+}
+
+func expectStatusCounts(ctx context.Context, className string, resourceCount, namespaceCount int32) {
+	namespaceClass := &nsclassv1alpha1.NamespaceClass{}
+	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: className}, namespaceClass)).To(Succeed())
+
+	Expect(namespaceClass.Status.ResourceCount).To(Equal(resourceCount))
+	Expect(namespaceClass.Status.NamespaceCount).To(Equal(namespaceCount))
 }
 
 func expectReadyCondition(
