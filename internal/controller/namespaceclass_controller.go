@@ -116,6 +116,7 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	return ctrl.Result{}, nil
 }
 
+// finalizeNamespaceClass deletes tracked resources and removes the NamespaceClass finalizer.
 func (r *NamespaceClassReconciler) finalizeNamespaceClass(
 	ctx context.Context,
 	namespaceClass *nsclassv1alpha1.NamespaceClass,
@@ -140,6 +141,7 @@ func (r *NamespaceClassReconciler) finalizeNamespaceClass(
 	return nil
 }
 
+// desiredResources builds the desired objects and status entries for namespaces that select the NamespaceClass.
 func (r *NamespaceClassReconciler) desiredResources(
 	ctx context.Context,
 	namespaceClass *nsclassv1alpha1.NamespaceClass,
@@ -192,6 +194,7 @@ func (r *NamespaceClassReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
+// namespaceToNamespaceClassRequests maps a Namespace object to the NamespaceClass reconcile request it selects.
 func namespaceToNamespaceClassRequests(_ context.Context, obj client.Object) []reconcile.Request {
 	className := namespaceClassName(obj)
 	if className == "" {
@@ -201,6 +204,7 @@ func namespaceToNamespaceClassRequests(_ context.Context, obj client.Object) []r
 	return []reconcile.Request{namespaceClassRequest(className)}
 }
 
+// namespaceClassEventHandler enqueues NamespaceClass reconcile requests for Namespace class changes.
 func namespaceClassEventHandler() handler.EventHandler {
 	return handler.Funcs{
 		CreateFunc: func(_ context.Context, e event.CreateEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
@@ -227,6 +231,7 @@ func namespaceClassEventHandler() handler.EventHandler {
 	}
 }
 
+// enqueueNamespaceClassRequest adds a reconcile request when className identifies a NamespaceClass.
 func enqueueNamespaceClassRequest(q workqueue.TypedRateLimitingInterface[reconcile.Request], className string) {
 	if className == "" {
 		return
@@ -234,10 +239,12 @@ func enqueueNamespaceClassRequest(q workqueue.TypedRateLimitingInterface[reconci
 	q.Add(namespaceClassRequest(className))
 }
 
+// namespaceClassRequest creates a cluster-scoped NamespaceClass reconcile request.
 func namespaceClassRequest(className string) reconcile.Request {
 	return reconcile.Request{NamespacedName: types.NamespacedName{Name: className}}
 }
 
+// namespaceClassName returns the NamespaceClass selected by the object's label or annotation.
 func namespaceClassName(obj client.Object) string {
 	if obj == nil {
 		return ""
@@ -250,6 +257,7 @@ func namespaceClassName(obj client.Object) string {
 	return obj.GetAnnotations()[namespaceClassNameKey]
 }
 
+// applyResource applies a prepared resource with server-side apply ownership.
 func (r *NamespaceClassReconciler) applyResource(ctx context.Context, obj *unstructured.Unstructured) error {
 	log := logf.FromContext(ctx)
 
@@ -279,6 +287,7 @@ func (r *NamespaceClassReconciler) applyResource(ctx context.Context, obj *unstr
 	return nil
 }
 
+// resourceForNamespace converts a template resource into a namespace-scoped managed object.
 func (r *NamespaceClassReconciler) resourceForNamespace(
 	resource runtime.RawExtension,
 	namespaceClassName string,
@@ -325,6 +334,7 @@ func (r *NamespaceClassReconciler) resourceForNamespace(
 	return obj, nil
 }
 
+// deleteManagedResource deletes a tracked resource only when it is still owned by the NamespaceClass.
 func (r *NamespaceClassReconciler) deleteManagedResource(
 	ctx context.Context,
 	namespaceClassName string,
@@ -354,6 +364,7 @@ func (r *NamespaceClassReconciler) deleteManagedResource(
 	return nil
 }
 
+// isManagedByNamespaceClass reports whether obj carries the expected NamespaceClass ownership markers.
 func isManagedByNamespaceClass(obj client.Object, namespaceClassName string) bool {
 	annotations := obj.GetAnnotations()
 	if annotations[namespaceClassManagedByAnnotation] == namespaceClassManagedByValue &&
@@ -366,6 +377,7 @@ func isManagedByNamespaceClass(obj client.Object, namespaceClassName string) boo
 		labels[namespaceClassNameKey] == namespaceClassName
 }
 
+// updateManagedResourcesStatus records the currently desired managed resources on the NamespaceClass status.
 func (r *NamespaceClassReconciler) updateManagedResourcesStatus(
 	ctx context.Context,
 	namespaceClassName string,
@@ -387,6 +399,7 @@ func (r *NamespaceClassReconciler) updateManagedResourcesStatus(
 	return nil
 }
 
+// staleManagedResources returns resources in current that are no longer present in desired.
 func staleManagedResources(
 	current []nsclassv1alpha1.NamespaceClassManagedResource,
 	desired []nsclassv1alpha1.NamespaceClassManagedResource,
@@ -406,6 +419,7 @@ func staleManagedResources(
 	return stale
 }
 
+// shouldDeleteManagedResource reports whether a stale managed resource should be removed.
 func shouldDeleteManagedResource(
 	resource nsclassv1alpha1.NamespaceClassManagedResource,
 	namespaceClassesByNamespace map[string]string,
@@ -422,6 +436,7 @@ func shouldDeleteManagedResource(
 	return true
 }
 
+// namespaceClassRemovalPolicy returns the configured removal policy or the default retain policy.
 func namespaceClassRemovalPolicy(namespaceClass *nsclassv1alpha1.NamespaceClass) nsclassv1alpha1.NamespaceClassRemovalPolicy {
 	if namespaceClass.Spec.RemovalPolicy == "" {
 		return nsclassv1alpha1.NamespaceClassRemovalPolicyRetain
@@ -429,6 +444,7 @@ func namespaceClassRemovalPolicy(namespaceClass *nsclassv1alpha1.NamespaceClass)
 	return namespaceClass.Spec.RemovalPolicy
 }
 
+// managedResourceFromObject returns the status entry that identifies obj as a managed resource.
 func managedResourceFromObject(obj *unstructured.Unstructured) nsclassv1alpha1.NamespaceClassManagedResource {
 	return nsclassv1alpha1.NamespaceClassManagedResource{
 		APIVersion: obj.GetAPIVersion(),
@@ -438,6 +454,7 @@ func managedResourceFromObject(obj *unstructured.Unstructured) nsclassv1alpha1.N
 	}
 }
 
+// sortManagedResources orders managed resources for stable status comparisons and updates.
 func sortManagedResources(resources []nsclassv1alpha1.NamespaceClassManagedResource) {
 	sort.Slice(resources, func(i, j int) bool {
 		left := resources[i]
@@ -455,6 +472,7 @@ func sortManagedResources(resources []nsclassv1alpha1.NamespaceClassManagedResou
 	})
 }
 
+// rawExtensionToUnstructured converts an embedded resource template into an unstructured object.
 func rawExtensionToUnstructured(resource runtime.RawExtension) (*unstructured.Unstructured, error) {
 	if resource.Object != nil {
 		if obj, ok := resource.Object.(*unstructured.Unstructured); ok {
