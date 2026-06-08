@@ -166,6 +166,21 @@ kubebuilder edit --plugins=helm/v2-alpha
 
 If webhooks or manifests change after chart generation, regenerate the chart with `--force` and manually restore any chart customizations.
 
+### GitHub Actions Release
+
+Pushing a SemVer tag such as `v1.2.3` publishes:
+
+- Controller image: `ghcr.io/laverya/nsclass-takehome:1.2.3`
+- Helm chart: `oci://ghcr.io/laverya/nsclass-takehome/nsclass-controller --version 1.2.3`
+
+Install a published chart:
+
+```sh
+helm install nsclass-controller \
+  oci://ghcr.io/laverya/nsclass-takehome/nsclass-controller \
+  --version 1.2.3
+```
+
 ## License
 
 Copyright 2026.

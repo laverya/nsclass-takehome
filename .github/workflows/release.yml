@@ -1,0 +1,158 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  PACKAGE_OWNER: laverya
+  PACKAGE_NAME: nsclass-takehome
+  CHART_NAME: nsclass-controller
+  PLATFORMS: linux/amd64,linux/arm64
+
+jobs:
+  publish:
+    name: Publish image and chart
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Set release metadata
+        id: meta
+        run: |
+          set -euo pipefail
+
+          tag="${GITHUB_REF_NAME}"
+          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "::error::Release tags must look like v1.2.3 or v1.2.3-rc.1"
+            exit 1
+          fi
+
+          version="${tag#v}"
+
+          {
+            echo "tag=${tag}"
+            echo "version=${version}"
+            echo "image=${REGISTRY}/${PACKAGE_OWNER}/${PACKAGE_NAME}"
+            echo "chart_repository=${REGISTRY}/${PACKAGE_OWNER}/${PACKAGE_NAME}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Install release tools
+        run: |
+          set -euo pipefail
+          make install-tools
+          helm version
+          docker buildx version
+
+      - name: Generate Helm chart
+        env:
+          IMG: ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          make build-installer IMG="${IMG}"
+          cp dist/install.yaml "${RUNNER_TEMP}/install.yaml"
+          bin/kubebuilder edit \
+            --plugins=helm/v2-alpha \
+            --force \
+            --manifests="${RUNNER_TEMP}/install.yaml" \
+            --output-dir=dist
+
+      - name: Package Helm chart
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          helm lint dist/chart
+          helm package dist/chart \
+            --destination dist \
+            --version "${VERSION}" \
+            --app-version "${VERSION}"
+
+      - name: Log in to GHCR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${GITHUB_TOKEN}" \
+            | docker login "${REGISTRY}" --username "${GITHUB_ACTOR}" --password-stdin
+          printf '%s' "${GITHUB_TOKEN}" \
+            | helm registry login "${REGISTRY}" --username "${GITHUB_ACTOR}" --password-stdin
+
+      - name: Build and push image
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          builder="nsclass-controller-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup() {
+            docker buildx rm "${builder}" >/dev/null 2>&1 || true
+            rm -f Dockerfile.cross
+          }
+          trap cleanup EXIT
+
+          sed -e '1 s/\(^FROM\)/FROM --platform=${BUILDPLATFORM}/; t' \
+            -e '1,// s//FROM --platform=${BUILDPLATFORM}/' \
+            Dockerfile > Dockerfile.cross
+
+          docker buildx create --use --name "${builder}"
+
+          tags=(
+            --tag "${IMAGE}:${VERSION}"
+            --tag "${IMAGE}:${TAG}"
+            --tag "${IMAGE}:sha-${GITHUB_SHA::12}"
+          )
+          if [[ "${VERSION}" != *-* ]]; then
+            tags+=(--tag "${IMAGE}:latest")
+          fi
+
+          docker buildx build \
+            --push \
+            --platform "${PLATFORMS}" \
+            "${tags[@]}" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.version=${VERSION}" \
+            -f Dockerfile.cross .
+
+      - name: Push Helm chart
+        env:
+          CHART_REPOSITORY: ${{ steps.meta.outputs.chart_repository }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          helm push "dist/${CHART_NAME}-${VERSION}.tgz" "oci://${CHART_REPOSITORY}"
+
+      - name: Write release summary
+        env:
+          CHART_REPOSITORY: ${{ steps.meta.outputs.chart_repository }}
+          IMAGE: ${{ steps.meta.outputs.image }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          {
+            echo "Published image: ${IMAGE}:${VERSION}"
+            echo "Published image alias: ${IMAGE}:${TAG}"
+            echo "Published chart: oci://${CHART_REPOSITORY}/${CHART_NAME}:${VERSION}"
+          } >> "${GITHUB_STEP_SUMMARY}"
